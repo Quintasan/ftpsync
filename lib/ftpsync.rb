@@ -20,6 +20,7 @@ module FtpSync
     end
 
     def pull_dir(remotepath, localpath, options = {}, &block)
+      FileUtils.mkpath(localpath) unless File.exist?(localpath) and log "Creating #{localpath} directory"
       connect! unless @connection
       @level += 1
 
@@ -48,6 +49,11 @@ module FtpSync
         todelete.delete paths[1]
       end
       
+      directories.each do |paths|
+        remotedir, localdir = paths
+        pull_dir(remotedir, localdir, options, &block)
+      end
+      
       files.each do |paths|
         remotefile, localfile = paths
         begin
@@ -57,13 +63,6 @@ module FtpSync
           log "Error when reading #{remotefile}"
           raise Net::FTPPermError unless options[:skip_errors]
         end
-      end
-
-      directories.each do |paths|
-        remotedir, localdir = paths
-        log "Creating #{localdir} directory"
-        FileUtils.mkpath(localdir) unless File.exists?(localdir)
-        pull_dir(remotedir, localdir, options, &block)
       end
 
       @level -= 1
