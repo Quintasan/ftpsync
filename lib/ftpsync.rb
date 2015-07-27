@@ -40,7 +40,7 @@ module FtpSync
           end
         elsif entry.file?
           if options[:since]
-            files << paths unless File.exists?[paths[1]] and entry.mtime < File.mtime(paths[1]) and entry.filesize == File.size(paths[1])
+            files << paths unless File.exist?(paths[1]) and entry.mtime < File.mtime(paths[1]) and entry.filesize == File.size(paths[1])
           else
             files << paths
           end
