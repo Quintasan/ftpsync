@@ -48,17 +48,21 @@ module FtpSync
         end
         todelete.delete paths[1]
       end
-      
+
       directories.each do |paths|
         remotedir, localdir = paths
         pull_dir(remotedir, localdir, options, &block)
       end
-      
+
       files.each do |paths|
         remotefile, localfile = paths
         begin
-          @connection.get(remotefile, localfile)
           log "#{remotefile} => #{localfile}"
+          @connection.get(remotefile, localfile)
+          if block_given?
+            log "Executing block"
+            yield(localfile)
+          end
         rescue Net::FTPPermError
           log "Error when reading #{remotefile}"
           raise Net::FTPPermError unless options[:skip_errors]
