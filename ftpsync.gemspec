@@ -1,26 +1,32 @@
-# coding: utf-8
-lib = File.expand_path('../lib', __FILE__)
-$LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
-require 'ftpsync/version'
+# frozen_string_literal: true
+
+require_relative 'lib/ftpsync/version'
 
 Gem::Specification.new do |spec|
-  spec.name          = "ftpsync"
-  spec.version       = FtpSync::VERSION
-  spec.authors       = ["Michał Zając"]
-  spec.email         = ["rubygems.org@quintasan.pl"]
+  spec.name = 'ftpsync'
+  spec.version = FtpSync::VERSION
+  spec.authors = ['Michał Zając']
+  spec.email = ['rubygems.org@quintasan.pl']
 
-  spec.summary       = %q{A simple library for synchronizing from/to FTP servers.}
-  spec.homepage      = "https://github.com/Quintasan/ftpsync"
-  spec.license       = "MIT"
+  spec.summary = 'A simple library for synchronizing from/to FTP servers.'
+  spec.description = 'Recursively pull directory trees from FTP servers, with support ' \
+                     'for incremental syncs and per-file callbacks.'
+  spec.homepage = 'https://github.com/Quintasan/ftpsync'
+  spec.license = 'MIT'
+  spec.required_ruby_version = '>= 2.6.0'
 
-  spec.files         = `git ls-files -z`.split("\x0").reject { |f| f.match(%r{^(test|spec|features)/}) }
-  spec.bindir        = "exe"
-  spec.executables   = spec.files.grep(%r{^exe/}) { |f| File.basename(f) }
-  spec.require_paths = ["lib"]
+  spec.metadata = {
+    'source_code_uri' => spec.homepage,
+    'rubygems_mfa_required' => 'true'
+  }
 
-  spec.add_dependency "net-ftp-list", ">= 3.2.8"
+  spec.files = Dir.chdir(__dir__) do
+    `git ls-files -z`.split("\x0").reject do |f|
+      f.match?(%r{^(test|spec|features)/|^\.github/}) || !File.file?(f)
+    end
+  end
+  spec.require_paths = ['lib']
 
-  spec.add_development_dependency "bundler", "~> 1.10"
-  spec.add_development_dependency "rake", "~> 10.0"
-  spec.add_development_dependency "minitest"
+  spec.add_dependency 'net-ftp'
+  spec.add_dependency 'net-ftp-list', '>= 3.2.8'
 end
