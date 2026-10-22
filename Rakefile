@@ -10,7 +10,7 @@ Rake::TestTask.new(:test) do |t|
   t.test_files = FileList['test/*_test.rb']
 end
 
-desc 'Run integration tests against a Dockerized FTP server'
+desc 'Run integration tests against an in-process FTP server'
 Rake::TestTask.new(:'test:integration') do |t|
   t.libs << 'test'
   t.libs << 'lib'

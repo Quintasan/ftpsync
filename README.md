@@ -209,14 +209,17 @@ against them and `rake rbs` validates them; both need Ruby 3.3 or newer, while
 the library still supports Ruby 2.6. CI runs them in the `types` job on Ruby 4.0.
 The signatures are not exhaustive: option values are `untyped`.
 
-### Integration tests (requires Docker)
+### Integration tests
 
-`rake test:integration` runs against vsftpd
-([garethflowers/ftp-server](https://garethflowers.dev/docker-ftp-server/)) on
-`127.0.0.1:2121` (control) and `127.0.0.1:40000-40009` (passive data). It skips
-without Docker, or fails when `FTPSYNC_REQUIRE_DOCKER=true` is set, and recreates
-the container each run. Set `FTPSYNC_TEST_USER`, `FTPSYNC_TEST_PASS` and
-`FTPSYNC_TEST_FTP_PORT` to override the credentials and control port.
+`rake test:integration` starts a real, pure-Ruby `Ftpd::FtpServer` in-process on
+an ephemeral port with a temporary root directory. It needs no Docker, never
+skips, and runs anywhere. `ftpd` is a development/test dependency; the unit
+tests use `FakeFtp` and open no sockets.
+
+CI runs the suite with `TZ=Europe/Warsaw`, because the difference between
+`LIST` local time and `MDTM` UTC — which push `:since` exists to survive —
+cannot appear on a UTC server. The server cannot do TLS under OpenSSL 3, so TLS
+remains covered by the option-forwarding tests.
 
 Run `bundle exec rake install` to install locally. To release, update
 `version.rb`, then run `bundle exec rake release`; it tags the version, pushes

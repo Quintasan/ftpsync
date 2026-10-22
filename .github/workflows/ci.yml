@@ -40,17 +40,15 @@ jobs:
       - run: bundle exec rake test
 
   test-integration:
-    name: Integration tests (vsftpd via Docker)
-    # The image is an old Alpine/musl build. Its vsftpd segfaults (container
-    # exit 139) a few logins into the run on ubuntu-latest (26.04), even with
-    # seccomp disabled, while ubuntu-24.04 plus `seccomp=unconfined` is stable.
-    # The crash predates 0.2.0: the pre-0.2.0 library fails the same way. Revisit
-    # when the image is rebuilt against a newer musl.
-    runs-on: ubuntu-24.04
+    name: Integration tests (real FTP server)
+    # The suite starts a pure-Ruby FTP server in-process, so it needs no
+    # container runtime and runs on every platform the matrix uses.
+    runs-on: ubuntu-latest
     env:
-      # The tests skip themselves when Docker is missing. On this job that must
-      # be a failure instead of a green run that exercised nothing.
-      FTPSYNC_REQUIRE_DOCKER: 'true'
+      # A non-UTC server is the only way to see the LIST-is-local-time versus
+      # MDTM-is-UTC difference that push :since exists to survive; on UTC the
+      # bug class cannot appear at all.
+      TZ: Europe/Warsaw
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0

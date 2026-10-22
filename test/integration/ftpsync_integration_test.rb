@@ -13,7 +13,6 @@ class FtpsyncIntegrationTest < Minitest::Test
   end
 
   def setup
-    skip 'Docker is not available' unless FtpServer.available?
     server.reset
   end
 
@@ -158,14 +157,85 @@ class FtpsyncIntegrationTest < Minitest::Test
     end
   end
 
+  # MDTM answers in UTC while LIST is a server-local wall clock. On a non-UTC
+  # server a LIST timestamp parsed as UTC moves into the future, so a same-size
+  # edit made after the 2 s MDTM tolerance would look unchanged and be skipped.
+  # Run with TZ=Europe/Warsaw: this fails if push :since ever falls back to
+  # LIST timestamps.
+  def test_push_since_detects_a_same_size_edit
+    Dir.mktmpdir do |local|
+      path = File.join(local, 'a.txt')
+      File.write(path, 'aaaa')
+      sync.push_dir(local, 'root')
+      # The remote copy is stored with the server's clock at upload time. Move
+      # past the MDTM tolerance before editing, or the edit is legitimately
+      # indistinguishable from clock jitter.
+      sleep 3
+
+      File.write(path, 'bbbb')
+      uploaded = []
+      sync.push_dir(local, 'root', since: true) { |remote| uploaded << remote }
+
+      assert_equal ['root/a.txt'], uploaded
+
+      assert_remote_content('root', 'a.txt', 'bbbb')
+    end
+  end
+
+  # The default upload path stores a side file and renames it into place. A
+  # push that replaces a file uploaded earlier therefore needs RNFR/RNTO that
+  # overwrite, and the server log proves the rename ran instead of the in-place
+  # fallback.
+  def test_push_replaces_an_existing_remote_file_through_rename
+    Dir.mktmpdir do |local|
+      path = File.join(local, 'a.txt')
+      File.write(path, 'v1')
+      sync.push_dir(local, 'root')
+
+      server.clear_log
+      File.write(path, 'version two')
+      sync.push_dir(local, 'root')
+
+      assert_includes server.log, 'RNFR'
+      assert_includes server.log, 'RNTO'
+
+      assert_remote_content('root', 'a.txt', 'version two')
+    end
+  end
+
+  # The fallback stores directly at the destination, truncating whatever the
+  # server had there, so it has to be exercised against a real server too.
+  def test_push_in_place_replaces_an_existing_remote_file
+    Dir.mktmpdir do |local|
+      path = File.join(local, 'a.txt')
+      File.write(path, 'v1')
+      sync.push_dir(local, 'root')
+
+      File.write(path, 'version two')
+      sync(atomic_uploads: false).push_dir(local, 'root')
+
+      assert_remote_content('root', 'a.txt', 'version two')
+    end
+  end
+
   private
 
   def server
     self.class.server
   end
 
-  def sync
+  # Pulls the remote directory and asserts the file's contents, so the check
+  # goes through the protocol instead of the server's temp directory.
+  def assert_remote_content(remote_dir, basename, expected)
+    Dir.mktmpdir do |pulled|
+      sync.pull_dir(remote_dir, pulled)
+
+      assert_equal expected, File.read(File.join(pulled, basename))
+    end
+  end
+
+  def sync(**options)
     FtpSync::Simple.new(FtpServer::HOST, FtpServer::USER, FtpServer::PASS,
-                        passive: true, port: FtpServer::FTP_PORT)
+                        passive: true, port: server.port, **options)
   end
 end

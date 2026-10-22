@@ -10,6 +10,10 @@ group :development, :test do
   # through Object#stub, so 5.x is the ceiling while CI covers Ruby 3.0/3.1.
   gem 'minitest', '~> 5.0'
   gem 'rake', '~> 13.0'
+  # A real, pure-Ruby FTP server run in-process by the integration tests, so
+  # they need no container. Test-only; it is not a runtime dependency and is
+  # not packaged in the gem.
+  gem 'ftpd'
   # Minor pins keep the lint job reproducible: `NewCops: enable` means a cop
   # added in a fresh 1.x release can fail a commit that changed nothing.
   gem 'rubocop', '~> 1.92.0'
