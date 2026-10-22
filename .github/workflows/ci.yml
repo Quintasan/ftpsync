@@ -12,14 +12,18 @@ permissions:
 jobs:
   test:
     name: Unit tests (Ruby ${{ matrix.ruby }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Ruby 3.0/3.1 have no prebuilt binaries for ubuntu-latest (26.04),
+          # so they stay on the last image that still ships them.
           - ruby: '3.0'
+            os: ubuntu-24.04
           - ruby: '3.1'
+            os: ubuntu-24.04
           - ruby: '3.2'
           - ruby: '3.3'
           - ruby: '3.4'

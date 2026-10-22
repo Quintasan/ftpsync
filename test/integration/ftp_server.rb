@@ -53,7 +53,7 @@ class FtpServer
   end
 
   def logs
-    `docker logs #{CONTAINER} 2>&1`.lines.last(20).join
+    `docker logs #{CONTAINER} 2>&1`.lines.last(40).join
   end
 
   private
@@ -90,8 +90,21 @@ class FtpServer
     ftp.login(USER, PASS)
     ftp.passive = true
     yield ftp
+  rescue SystemCallError, EOFError => e
+    raise "#{e.class}: #{e.message}\n#{diagnostics}"
   ensure
     ftp&.close
+  end
+
+  # A connection that fails mid-run means the container is gone, and the reason
+  # is in its own output rather than in the test that noticed.
+  def diagnostics
+    "container: #{container_state}\n--- last output ---\n#{logs}"
+  end
+
+  def container_state
+    format = 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'
+    `docker inspect -f '#{format}' #{CONTAINER} 2>&1`.strip
   end
 
   def with_tempfile(content)
