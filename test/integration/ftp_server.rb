@@ -7,7 +7,9 @@ require 'tempfile'
 # Manages a garethflowers/ftp-server (vsftpd) container for integration
 # tests. See https://garethflowers.dev/docker-ftp-server/
 class FtpServer
-  IMAGE = 'garethflowers/ftp-server'
+  # Pinned rather than `latest`: the image is a fixed Alpine build and a moving
+  # tag would make an integration failure impossible to attribute.
+  IMAGE = 'garethflowers/ftp-server:0.9.2'
   HOST = '127.0.0.1'
   FTP_PORT = Integer(ENV.fetch('FTPSYNC_TEST_FTP_PORT', '2121'))
   PASV_PORTS = (40_000..40_009).freeze

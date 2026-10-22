@@ -41,7 +41,11 @@ jobs:
 
   test-integration:
     name: Integration tests (vsftpd via Docker)
-    runs-on: ubuntu-latest
+    # The vsftpd image is an old Alpine/musl build and its PID 1 segfaults
+    # (container exit 139) shortly after a few logins on ubuntu-latest (26.04),
+    # while the same image is stable on 24.04. Revisit when the image is
+    # rebuilt against a newer musl or the tests move to a different server.
+    runs-on: ubuntu-24.04
     env:
       # The tests skip themselves when Docker is missing. On this job that must
       # be a failure instead of a green run that exercised nothing.
