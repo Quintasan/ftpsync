@@ -53,10 +53,11 @@ directory; a local path must be a non-empty string.
 sync.push_dir('./public', '/var/www/public')
 ```
 
-`push_dir` mirrors the local tree on the server, creating every missing part of
-the remote path. Local symlinks, `.ftpsync-part` leftovers and anything that is
-not a regular file or directory are skipped. The local path must be a directory,
-or `push_dir` raises `ArgumentError` before connecting.
+`push_dir` copies the local tree to the server, creating every missing part of
+the remote path. It is additive by default: remote files deleted locally stay on
+the server until you pass `:prune`. Local symlinks, `.ftpsync-part` leftovers and
+anything that is not a regular file or directory are skipped. The local path
+must be a directory, or `push_dir` raises `ArgumentError` before connecting.
 
 Uploads are atomic by default: data goes to `<remote>.ftpsync-part` and is
 renamed into place when the transfer finishes, so a failed `STOR` is just a
@@ -75,22 +76,37 @@ With `:since`, a file is skipped when its size matches and the timestamps show
 no newer change; skipped files count in `result.skipped` and do not reach the
 block.
 
-* **Downloading** stores the server's `LIST` timestamp on the downloaded file
-  and skips a file when its size matches and the remote copy is not newer. A
-  locally edited file is kept.
+* **Downloading** stores the server's timestamp and skips a file when its size
+  matches and the remote copy is not newer; a same-size local edit is kept. A
+  different-size edit is replaced unless `:protect_local` is set, and a file with
+  no usable remote timestamp is downloaded, or kept with `:protect_local`.
 * **Uploading** cannot carry the local modification time: the server stamps the
   upload with its own clock. A same-size file is skipped when it is less than
   the tolerance newer than the remote timestamp.
 
 For uploads FtpSync reads `MDTM` (UTC, second precision) and allows 2 seconds of
-clock jitter. Without `MDTM` it uses `LIST`, whose local-time reading is treated
-as UTC, so the comparison can be off by the server's UTC offset and uses
-`:mtime_tolerance` (60 seconds by default) for minute rounding. A backdated file
-(`cp -p`, restored build output) looks unchanged.
+clock jitter. Without `MDTM` it uses the listing timestamp: `MLSD` is also UTC
+and second-precision, while `LIST` is a local-time reading treated as UTC and
+uses `:mtime_tolerance` (60 seconds by default) for minute rounding. A backdated
+file (`cp -p`, restored build output) looks unchanged.
 
-With `:skip_errors`, a failed remote listing leaves that directory's files
-unuploaded and records the failure in `result.failed`/`result.errors`: an
-unreadable listing cannot prove a remote copy is current.
+With `:since`, a push leaves a directory unuploaded when its remote listing
+failed or was only partly readable: freshness cannot be proven. Swallowed
+failures and unreadable entries are recorded in `result.failed`/`result.errors`.
+
+## Delete what the source no longer has (`:prune`)
+
+```ruby
+sync.pull_dir('reports/2024', './reports', prune: true)
+sync.push_dir('./public', '/var/www/public', prune: true)
+```
+
+`:prune` is destructive and off by default. It deletes destination files the
+source no longer has, and whole directories when their subtree is gone. The
+destination root is never deleted. Pruning is skipped when a listing fails or
+cannot be fully read, and the reason is logged, so a bad listing never deletes
+anything. Symbolic links are never followed: a local link is unlinked, a remote
+one is left alone; `result.deleted` counts removals.
 
 ## Run code for each transferred file
 
@@ -106,13 +122,13 @@ sync.push_dir('./public', '/var/www/public') { |file| puts "uploaded #{file}" }
 ## Read the result of a sync
 
 Both methods return a `FtpSync::Simple::Result` with `transferred`, `skipped`,
-`failed` and `errors`. `skipped` counts entries left alone on purpose (up-to-date
-files, non-files, protected files, leftovers); `failed` counts errors
-`:skip_errors` swallowed, each also in `errors` as a `[path, message]` pair.
+`failed`, `errors` and `deleted`. `skipped` counts entries left alone on purpose;
+`deleted` counts `:prune` removals; `failed` counts swallowed errors and
+unreadable listing entries, each also in `errors` as a `[path, message]` pair.
 
 ```ruby
-result = sync.pull_dir('reports', './reports', skip_errors: true)
-puts "#{result.transferred} transferred, #{result.skipped} skipped, #{result.failed} failed"
+result = sync.pull_dir('reports', './reports', skip_errors: true, prune: true)
+puts "#{result.transferred} transferred, #{result.skipped} skipped, #{result.failed} failed, #{result.deleted} deleted"
 result.errors.each { |path, message| puts "#{path}: #{message}" }
 ```
 
@@ -171,12 +187,18 @@ non-empty strings; remote paths may be empty. `FtpSync::Simple.new` accepts:
 | `:mtime_tolerance` | `60`                                     | `LIST` upload tolerance in seconds; a non-negative Numeric (Float allowed), otherwise `ArgumentError`. `MDTM` uses a fixed 2-second tolerance. |
 | `:atomic_uploads`  | `true`                                   | Upload to `<remote>.ftpsync-part` and rename into place. Set to `false` to write directly to the destination. |
 
-`pull_dir` accepts `:since`, `:skip_errors` and `:protect_local`; `push_dir`
-only `:since` and `:skip_errors`. All default to `false`; `:protect_local` on
-`push_dir` raises like any unknown key. `:verbose` writes through
-`FtpSync::Simple#log`, which can be overridden.
+`pull_dir` accepts `:since`, `:skip_errors`, `:protect_local` and `:prune`;
+`push_dir` accepts `:since`, `:skip_errors` and `:prune`. All default to `false`;
+`:protect_local` on `push_dir` raises like any unknown key. `:verbose` writes
+through `FtpSync::Simple#log`, which can be overridden.
 
 ## Behaviour worth knowing
+
+Listings prefer `MLSD`, with one support probe per connection and a `LIST`
+fallback logged with `:verbose`. `MLSD` types every entry and dates it in UTC;
+`LIST` has to be parsed and is locale-sensitive. An entry whose type cannot be
+determined is recorded in `failed`/`errors`, not skipped, so an unreadable
+listing cannot look like a near-empty successful pull.
 
 * Transfers are binary; no line endings are translated.
 * Downloads and atomic uploads use `.ftpsync-part` side files and leave the

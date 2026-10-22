@@ -51,6 +51,28 @@ class FtpServer
     end
   end
 
+  # ftpd 2.1.0 has no MLSD at all, and the command loop answers an unknown
+  # command with 500 while leaving the passive listener open. The next PASV then
+  # answers "200 Already in passive mode" and the LIST fallback dies on a
+  # surprise reply. A real server without MLSD answers 502 and forgets the
+  # listener, so this handler does exactly that: the integration suite keeps
+  # exercising the LIST fallback against a server that really has no MLSD.
+  class CmdMlsd < Ftpd::CommandHandler
+    def cmd_mlsd(_argument)
+      ensure_logged_in
+      close_data_server_socket
+      unimplemented_error
+    end
+  end
+
+  # Handler classes are read from this factory whenever a session starts.
+  module MlsdHandlerRegistration
+    def standard_command_handlers
+      super + [CmdMlsd]
+    end
+  end
+  Ftpd::CommandHandlerFactory.singleton_class.prepend(MlsdHandlerRegistration)
+
   # FTP's RNTO is allowed to reject an existing destination (ftpd answers
   # 550 "Already exists"), but servers in practice replace it, and this library
   # relies on that: a push updates files uploaded by an earlier run through

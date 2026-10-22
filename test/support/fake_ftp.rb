@@ -41,7 +41,9 @@ class FakeFtp
 
   attr_reader :downloaded, :uploaded, :attempted_puts, :created_dirs, :mkdir_calls,
               :deleted, :renames, :connect_count, :new_args, :contents, :get_calls,
-              :fail_gets, :fail_puts, :fail_put_replies, :fail_lists, :fail_mkdirs,
+              :list_calls, :mlsd_calls, :rmdir_calls, :mlsx_facts, :fail_gets,
+              :fail_puts, :fail_put_replies, :fail_lists, :fail_lists_after, :fail_mlsd,
+              :fail_mkdirs,
               :fail_mdtms, :fail_renames, :mdtm_calls, :mdtm_replies
 
   # +server_offset+ is how far the server's LIST wall clock leads UTC; real
@@ -49,7 +51,9 @@ class FakeFtp
   #
   # +fail_connect+ and +fail_login+ model a server that refuses the connection
   # or the credentials. +rename_unsupported+ models a server without RNFR/RNTO.
-  attr_accessor :server_offset, :fail_connect, :fail_login, :rename_unsupported
+  # +mlsx+ says whether the server answers MLSD; it is off by default, like the
+  # integration server (ftpd), so the LIST fallback stays the common path.
+  attr_accessor :server_offset, :fail_connect, :fail_login, :rename_unsupported, :mlsx
 
   # +listings+ maps a remote directory to the entries it holds, +contents+
   # maps remote file paths to their contents.
@@ -91,13 +95,52 @@ class FakeFtp
   # Listing a path that is a file answers with that file's own entry, as a real
   # server does; only a path that is neither lists nothing.
   def list(remote, &block)
+    @list_calls << remote
     raise Net::FTPPermError, "550 #{remote}: Permission denied" if @fail_lists.include?(remote)
 
-    entries = entries_at(remote)
-    lines = entries.map { |entry| register(list_view(entry)) }
-    return lines unless block
+    lines = entries_at(remote).map { |entry| register(list_view(entry)) }
+    lines.each(&block) if block
+    raise_after_cut_listing(remote)
+    block ? nil : lines
+  end
 
-    lines.each(&block)
+  # A server whose data connection dies mid-listing has already sent a prefix:
+  # the client saw entries but must not treat them as the whole directory.
+  def raise_after_cut_listing(remote)
+    return unless @fail_lists_after.key?(remote)
+
+    raise Net::FTPPermError, @fail_lists_after[remote]
+  end
+
+  # MLSx answers with typed facts and a UTC modify stamp, which is what the
+  # library prefers over LIST when the server has it. The first two entries are
+  # the cdir/pdir pseudo entries a real server emits, so the client has to
+  # ignore them.
+  def mlsd(remote, &block)
+    @mlsd_calls << remote
+    raise Net::FTPPermError, @fail_mlsd[remote] if @fail_mlsd.key?(remote)
+    raise Net::FTPPermError, '502 MLSD not implemented' unless @mlsx
+
+    entries = [mlsx_entry('.', { 'type' => 'cdir' }), mlsx_entry('..', { 'type' => 'pdir' })]
+    entries += entries_at(remote).reject { |entry| %w[. ..].include?(entry.basename) }
+                                 .map { |entry| mlsx_entry(entry.basename, mlsx_facts_for(entry)) }
+    return entries unless block
+
+    entries.each(&block)
+  end
+
+  # RMD only succeeds on a directory that is already empty, so a recursive
+  # removal that skipped something shows up as a failure.
+  def rmdir(path)
+    @rmdir_calls << path
+    raise Net::FTPPermError, "550 #{path}: Permission denied" unless @dirs.include?(path)
+    raise Net::FTPPermError, "550 #{path}: Directory not empty" unless (@entries[path] || []).empty?
+
+    @dirs.delete(path)
+    @entries.delete(path)
+    # The parent listing must stop mentioning the directory, as on a real server.
+    remove_entry(path)
+    nil
   end
 
   # MDTM reports a file's modification time in UTC, without the wall clock
@@ -195,9 +238,16 @@ class FakeFtp
     @closed
   end
 
+  # How the fake's entry types look in an MLSx type fact.
+  MLSX_TYPES = { file: 'file', dir: 'dir', symlink: 'OS.unix=slink', device: 'OS.unix=chr' }.freeze
+
   private
 
   def reset_state
+    @list_calls = []
+    @mlsd_calls = []
+    @rmdir_calls = []
+    @mlsx_facts = {}
     @downloaded = []
     @get_calls = []
     @uploaded = []
@@ -210,6 +260,11 @@ class FakeFtp
     @mdtm_calls = []
     @connect_count = 0
     @line_counter = 0
+    reset_flags
+  end
+
+  def reset_flags
+    @mlsx = false
     @closed = true
     @fail_connect = false
     @fail_login = false
@@ -238,6 +293,22 @@ class FakeFtp
     [entry]
   end
 
+  # Facts a test wants to control exactly, merged over the generated ones. An
+  # MLSx fact set is the only way to express a missing modify stamp, an unknown
+  # type or a pseudo entry, none of which a LIST line can carry.
+  def mlsx_facts_for(entry)
+    facts = {}
+    type = MLSX_TYPES[entry.type]
+    facts['type'] = type if type
+    facts['size'] = entry.filesize if entry.filesize
+    facts['modify'] = entry.mtime.utc if entry.mtime
+    facts.merge(@mlsx_facts.fetch(entry.basename, {}))
+  end
+
+  def mlsx_entry(pathname, facts)
+    Net::FTP::MLSxEntry.new(facts, pathname)
+  end
+
   def register(entry)
     @line_counter += 1
     line = "line#{@line_counter}"
@@ -264,6 +335,8 @@ class FakeFtp
     @fail_puts = []
     @fail_put_replies = {}
     @fail_lists = []
+    @fail_lists_after = {}
+    @fail_mlsd = {}
     @fail_mkdirs = []
     @fail_mdtms = {}
     @fail_renames = []

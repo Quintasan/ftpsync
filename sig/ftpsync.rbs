@@ -1,8 +1,8 @@
 # Types for FtpSync.
 #
 # `FtpSync::VERSION` and `FtpSync::Simple` are the whole public surface:
-# everything under `Simple::Session`, `Simple::Pull` and `Simple::Push` is
-# internal. Those collaborators are still declared here, because they are
+# everything under `Simple::Session`, `Simple::Entry`, `Simple::Listing`,
+# `Simple::Pull`, `Simple::Push` and `Simple::Prune` is internal. Those collaborators are still declared here, because they are
 # private methods and modules of `Simple` and Steep can only check
 # `lib/ftpsync.rb` as one unit if it knows their types.
 #
@@ -36,22 +36,27 @@ class FtpSync::Simple
 
   # How far a local file may lead the remote timestamp and still count as
   # unchanged. `LIST` reports whole minutes, so it needs a wide tolerance;
-  # `MDTM` reports whole seconds in UTC, so it needs almost none.
+  # `MLSD` and `MDTM` report whole seconds in UTC, so they need almost none.
   DEFAULT_MTIME_TOLERANCE: Integer
   MDTM_TOLERANCE: Integer
 
   # Option keys each entry point accepts. They are exposed constants, so a
   # caller can build its option hash without duplicating them. `PULL_OPTIONS`
-  # also carries :protect_local, which has no meaning while pushing.
+  # also carries :protect_local, which has no meaning while pushing; :prune is
+  # accepted by both directions.
   CONSTRUCTOR_OPTIONS: Array[Symbol]
   PULL_OPTIONS: Array[Symbol]
   PUSH_OPTIONS: Array[Symbol]
 
   # Internal: the MDTM time-val format, and the reply codes that mean "this
-  # server has no MDTM/RNTO", as opposed to a per-file failure.
+  # server has no MDTM/MLSD/RNTO", as opposed to a per-file failure.
   MDTM_FORMAT: Regexp
   MDTM_UNSUPPORTED: Regexp
   RENAME_UNSUPPORTED: Regexp
+  MLSD_UNSUPPORTED: Regexp
+
+  # Reported for a listing entry whose type could not be determined.
+  UNUSABLE_ENTRY: String
 
   # Read when a connection is opened. Assigning to them later does not move an
   # open connection and does not relabel it in the log.
@@ -89,6 +94,7 @@ class FtpSync::Simple
   #   :since          skip files whose local copy is current
   #   :skip_errors    rescue Net::FTPError, log it and keep going
   #   :protect_local  skip files that are newer locally than on the server
+  #   :prune          delete local entries the remote listing does not have
   #
   # The block receives the local path of every file that was fully downloaded;
   # skipped and failed files never reach it. The connection is opened here if it
@@ -105,6 +111,7 @@ class FtpSync::Simple
   # Push options:
   #   :since          skip files whose remote copy is current
   #   :skip_errors    rescue Net::FTPError, log it and keep going
+  #   :prune          delete remote entries the local tree does not have
   #
   # The block receives the remote path of every file that was fully uploaded.
   # +localpath+ that is not a directory raises ArgumentError before a
@@ -133,20 +140,70 @@ class FtpSync::Simple
   # Outcome of one top-level sync.
   #
   # +transferred+ counts files that reached their destination, +skipped+ counts
-  # entries deliberately left alone, and +failed+ counts the errors that
-  # :skip_errors swallowed, each of which is also listed in +errors+ as a
-  # [path, message] pair.
+  # entries deliberately left alone, +deleted+ counts entries pruned under
+  # :prune, and +failed+ counts the errors that :skip_errors swallowed together
+  # with listing entries that could not be interpreted, each of which is also
+  # listed in +errors+ as a [path, message] pair.
   class Result
     attr_accessor transferred: Integer
     attr_accessor skipped: Integer
     attr_accessor failed: Integer
     attr_accessor errors: Array[[String, String]]
+    attr_accessor deleted: Integer
 
     def initialize: (
       Integer transferred,
       Integer skipped,
       Integer failed,
-      Array[[String, String]] errors
+      Array[[String, String]] errors,
+      Integer deleted
+    ) -> void
+  end
+
+  # One listing entry, normalised from an MLSx fact set or a parsed LIST line.
+  # +type+ is nil when the source did not say what the entry is; +mtime+ is nil
+  # when it carried no usable modification time, and +mtime_source+ (:mlsx or
+  # :list) records the precision the timestamp has.
+  class Entry
+    MLSX_TYPES: Hash[String, Symbol]
+    PSEUDO_NAMES: Array[String]
+
+    def self.from_mlsx: (Net::FTP::MLSxEntry mlsx_entry) -> Entry?
+    def self.from_list: (Net::FTP::List::Entry list_entry) -> Entry
+
+    attr_reader basename: String
+    attr_reader type: Symbol?
+    attr_reader filesize: Integer
+    attr_reader mtime: Time?
+    attr_reader mtime_source: Symbol
+
+    def initialize: (
+      String basename,
+      Symbol? type,
+      Integer filesize,
+      Time? mtime,
+      Symbol mtime_source
+    ) -> void
+
+    def dir?: () -> bool
+    def file?: () -> bool
+    def pseudo?: () -> bool
+  end
+
+  # What one directory listing turned into: subdirectories to recurse into,
+  # files to transfer, every name the source reports (the keep-set for pruning)
+  # and how completely the listing could be interpreted.
+  class Listing
+    attr_accessor directories: Array[[String, String]]
+    attr_accessor files: Array[[String, String, Entry]]
+    attr_accessor names: Hash[String, bool]
+    attr_accessor status: Symbol
+
+    def initialize: (
+      Array[[String, String]] directories,
+      Array[[String, String, Entry]] files,
+      Hash[String, bool] names,
+      Symbol status
     ) -> void
   end
 
@@ -193,6 +250,7 @@ class FtpSync::Simple
   @depth: Integer
   @mdtm_supported: bool
   @rename_supported: bool
+  @mlsx_supported: bool
 
   private
 
@@ -219,33 +277,41 @@ class FtpSync::Simple
   def join_remote: (String? remote_dir, String basename) -> String
   def remote_components: (String remotepath) -> Array[String]
 
-  def each_entry: (String remotepath, Session session) { (Net::FTP::List::Entry entry) -> void } -> bool
-  def remote_entries: (String remotepath, Session session) -> Hash[String, Net::FTP::List::Entry]?
+  # Returns :ok, :partial (some entries could not be interpreted) or :failed.
+  def each_entry: (String remotepath, Session session) { (Entry entry) -> void } -> Symbol
+
+  # Yields the raw listing from MLSD when the server has it, from LIST otherwise.
+  def listing_entries: (String remotepath) { (Entry entry) -> void } -> void
+
+  # A nil status means no listing was asked for.
+  def remote_entries: (String remotepath, Session session) -> [Symbol?, Hash[String, Entry]]
 
   # The parsed entries for a path, or nil when the server will not list it.
-  def entries_at: (String path) -> Array[Net::FTP::List::Entry]?
+  def entries_at: (String path) -> Array[Entry]?
 
-  # The LIST entry for a path in its parent directory, or nil when the parent
-  # cannot be listed or does not report the name.
-  def parent_entry: (String path) -> Net::FTP::List::Entry?
+  # The entry for a path in its parent directory, or nil when the parent cannot
+  # be listed or does not report the name.
+  def parent_entry: (String path) -> Entry?
 
   def skip_upload?: (
     String remote_file,
-    Net::FTP::List::Entry? remote_entry,
+    Entry? remote_entry,
     String local_path,
     Session session
   ) -> bool
 
   # A LIST timestamp is a wall clock reading and needs the wide default
-  # tolerance; an MDTM timestamp is UTC with second precision.
+  # tolerance; MLSD and MDTM date entries in UTC with second precision.
   def tolerance_for: (Symbol provenance) -> Numeric
-  def remote_time: (String remote_file, Net::FTP::List::Entry entry) -> [Time, Symbol]
+  def remote_time: (String remote_file, Entry entry) -> [Time?, Symbol]
+  def entry_time: (Entry entry) -> [Time?, Symbol]
   def note_mdtm_failure: (String remote_file, Net::FTPError error) -> void
 
   # The shared transfer guard: `true` when the transfer completed, `false` when
   # :skip_errors swallowed its failure.
   def transfer_file: (String path, Session session) { () -> void } -> bool
   def report_error: (Result result, String path, Net::FTPError error) -> void
+  def report_failure: (Result result, String path, String message) -> void
 end
 
 # The pull direction: listing a remote tree and turning it into local files.
@@ -264,9 +330,16 @@ module FtpSync::Simple::Pull
   def each_entry: (
     String remotepath,
     FtpSync::Simple::Session session
-  ) { (Net::FTP::List::Entry entry) -> void } -> bool
+  ) { (FtpSync::Simple::Entry entry) -> void } -> Symbol
   def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
   def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  # Provided by `FtpSync::Simple::Prune`.
+  def prune_local_directory: (
+    String localpath,
+    Hash[String, bool] remote_names,
+    Symbol status,
+    FtpSync::Simple::Session session
+  ) -> void
 
   def pull_into: (
     String remotepath,
@@ -276,30 +349,43 @@ module FtpSync::Simple::Pull
 
   def ensure_local_directory: (String localpath) -> void
 
-  # The entries of one remote directory split into directories to recurse into
-  # and files to download, or nil when the listing failed and was swallowed.
+  # Nil when the listing itself failed and was swallowed.
   def scan_directory: (
     String remotepath,
     String localpath,
     FtpSync::Simple::Session session
-  ) -> [
-    Array[[String, String]],
-    Array[[String, String, Net::FTP::List::Entry]]
-  ]?
+  ) -> FtpSync::Simple::Listing?
 
-  def entry_type: (Net::FTP::List::Entry entry) -> String
-  def pull_file?: (String local_path, Net::FTP::List::Entry entry, FtpSync::Simple::Session session) -> bool
-  def skip_file?: (String local_path, Net::FTP::List::Entry entry, FtpSync::Simple::Session session) -> bool
-  def newer_local?: (String local_path, Net::FTP::List::Entry entry) -> bool
+  def scan_entry: (
+    FtpSync::Simple::Listing listing,
+    String remotepath,
+    String localpath,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> void
+
+  def entry_type: (FtpSync::Simple::Entry entry) -> String
+  def pull_file?: (
+    String local_path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> bool
+  def keep_local_without_remote_time?: (String local_path, FtpSync::Simple::Session session) -> bool
+  def skip_file?: (
+    String local_path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> bool
+  def newer_local?: (String local_path, FtpSync::Simple::Entry entry) -> bool
 
   def download: (
     String remote_file,
     String local_file,
-    Net::FTP::List::Entry entry,
+    FtpSync::Simple::Entry entry,
     FtpSync::Simple::Session session
   ) ?{ (String local_file) -> void } -> void
 
-  def warn_size_mismatch: (String remote_file, String partial, Net::FTP::List::Entry entry) -> void
+  def warn_size_mismatch: (String remote_file, String partial, FtpSync::Simple::Entry entry) -> void
 end
 
 # The push direction: creating the remote tree and storing files in it.
@@ -314,17 +400,18 @@ module FtpSync::Simple::Push
   # `FtpSync::Simple::Pull`.
   def log: (String message) -> nil
   def join_remote: (String? remote_dir, String basename) -> String
+  # A nil status means no listing was asked for.
   def remote_entries: (
     String remotepath,
     FtpSync::Simple::Session session
-  ) -> Hash[String, Net::FTP::List::Entry]?
-  def entries_at: (String path) -> Array[Net::FTP::List::Entry]?
-  def parent_entry: (String path) -> Net::FTP::List::Entry?
+  ) -> [Symbol?, Hash[String, FtpSync::Simple::Entry]]
+  def entries_at: (String path) -> Array[FtpSync::Simple::Entry]?
+  def parent_entry: (String path) -> FtpSync::Simple::Entry?
   def remote_components: (String remotepath) -> Array[String]
   def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
   def skip_upload?: (
     String remote_file,
-    Net::FTP::List::Entry? remote_entry,
+    FtpSync::Simple::Entry? remote_entry,
     String local_path,
     FtpSync::Simple::Session session
   ) -> bool
@@ -333,6 +420,14 @@ module FtpSync::Simple::Push
     FtpSync::Simple::Result result,
     String path,
     Net::FTPError error
+  ) -> void
+  # Provided by `FtpSync::Simple::Prune`.
+  def prune_remote_directory: (
+    String remotepath,
+    Hash[String, FtpSync::Simple::Entry] remote_entries,
+    Hash[String, bool] local_names,
+    Symbol? status,
+    FtpSync::Simple::Session session
   ) -> void
 
   def push_into: (
@@ -344,7 +439,7 @@ module FtpSync::Simple::Push
   def push_entry: (
     String local_child,
     String remote_child,
-    Net::FTP::List::Entry? remote_entry,
+    FtpSync::Simple::Entry? remote_entry,
     FtpSync::Simple::Session session
   ) ?{ (String remote_file) -> void } -> void
 
@@ -361,14 +456,82 @@ module FtpSync::Simple::Push
   def upload: (
     String local_file,
     String remote_file,
-    Net::FTP::List::Entry? remote_entry,
+    FtpSync::Simple::Entry? remote_entry,
     FtpSync::Simple::Session session
   ) ?{ (String remote_file) -> void } -> void
 
   def store_file: (String local_file, String remote_file) -> void
-  def store_without_rename: (String local_file, String remote_file, Net::FTPError error) -> void
   def store_side_file: (String local_file, String temporary) -> void
   def rename_side_file: (String temporary, String remote_file) -> Net::FTPError?
+  def store_without_rename: (String local_file, String remote_file, Net::FTPError error) -> void
   def store_in_place: (String local_file, String remote_file) -> void
   def discard_remote_file: (String path) -> void
+end
+
+# :prune deletes what the source no longer has, in both directions. It only
+# deletes from a listing that was read and interpreted whole.
+module FtpSync::Simple::Prune
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module; see the note in
+  # `FtpSync::Simple::Pull`.
+  def log: (String message) -> nil
+  def join_remote: (String? remote_dir, String basename) -> String
+  def each_entry: (
+    String remotepath,
+    FtpSync::Simple::Session session
+  ) { (FtpSync::Simple::Entry entry) -> void } -> Symbol
+  def entry_type: (FtpSync::Simple::Entry entry) -> String
+  def report_error: (
+    FtpSync::Simple::Result result,
+    String path,
+    Net::FTPError error
+  ) -> void
+
+  def prune_local_directory: (
+    String localpath,
+    Hash[String, bool] remote_names,
+    Symbol status,
+    FtpSync::Simple::Session session
+  ) -> void
+  def remove_local_entry: (String local_path, FtpSync::Simple::Session session) -> void
+  def remove_local_tree: (String local_path, FtpSync::Simple::Session session) -> void
+
+  def prune_remote_directory: (
+    String remotepath,
+    Hash[String, FtpSync::Simple::Entry] remote_entries,
+    Hash[String, bool] local_names,
+    Symbol? status,
+    FtpSync::Simple::Session session
+  ) -> void
+  # `true` when the entry is gone; nil when it was left in place.
+  def remove_remote_entry: (
+    String remote_path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> true?
+  def remove_remote_content: (
+    String remote_path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> true?
+  def remove_remote_tree: (String remote_path, FtpSync::Simple::Session session) -> true?
+  def deleted_entry: (String path, FtpSync::Simple::Session session) -> void
+  def refuse_pruning: (String path, Symbol? status) -> nil
+end
+
+# Members of `net-ftp` 0.3.9 that this library calls but that
+# `sig/external/net-ftp.rbs` (outside this change's scope) does not declare yet.
+# Move these next to the other net-ftp stubs and delete this block.
+class Net::FTP
+  # One MLSx entry: the fact set and the path it describes.
+  class MLSxEntry
+    attr_reader facts: Hash[String, untyped]
+    attr_reader pathname: String
+
+    def initialize: (Hash[String, untyped] facts, String pathname) -> void
+  end
+
+  def mlsd: (?String? pathname) ?{ (MLSxEntry entry) -> void } -> Array[MLSxEntry]
+  def rmdir: (String dirname) -> void
 end

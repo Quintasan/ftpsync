@@ -48,20 +48,32 @@ module FtpSync
     # connection.
     RENAME_UNSUPPORTED = /\A50[024]/.freeze
 
+    # Reply codes that mean the server has no MLSD at all. LIST is then the only
+    # source of listings for the rest of the connection.
+    MLSD_UNSUPPORTED = /\A50[0124]/.freeze
+
+    # Reported for a listing entry whose type could not be determined. Such an
+    # entry is a failure, not a skip: a run that cannot read its listing must
+    # not look successful.
+    UNUSABLE_ENTRY = 'unusable listing entry: type unknown'
+
     CONSTRUCTOR_OPTIONS = %i[port passive verbose implicit_ftps ssl open_timeout
                              read_timeout mtime_tolerance atomic_uploads].freeze
 
     # :protect_local only means something when pulling, so pushing rejects it
-    # like any other option the direction does not understand.
-    PULL_OPTIONS = %i[since skip_errors protect_local].freeze
-    PUSH_OPTIONS = %i[since skip_errors].freeze
+    # like any other option the direction does not understand. :prune applies to
+    # both directions.
+    PULL_OPTIONS = %i[since skip_errors protect_local prune].freeze
+    PUSH_OPTIONS = %i[since skip_errors prune].freeze
 
     # Outcome of one top-level sync. +transferred+ counts files that reached
     # their destination, +skipped+ counts entries deliberately left alone (up to
     # date under :since, symlinks and other non-files, protected local files,
-    # leftover partial files) and +failed+ counts errors :skip_errors swallowed,
-    # each also listed in +errors+ as a [path, message] pair.
-    Result = Struct.new(:transferred, :skipped, :failed, :errors)
+    # leftover partial files), +deleted+ counts entries pruned under :prune, and
+    # +failed+ counts errors :skip_errors swallowed together with listing entries
+    # that could not be interpreted. Every failure is also listed in +errors+ as
+    # a [path, message] pair.
+    Result = Struct.new(:transferred, :skipped, :failed, :errors, :deleted)
 
     # State of one top-level sync: the caller's options, the tally that becomes
     # the return value, and the remote directories already created or confirmed.
@@ -72,7 +84,7 @@ module FtpSync
 
       def initialize(options)
         @options = options
-        @result = Result.new(0, 0, 0, [])
+        @result = Result.new(0, 0, 0, [], 0)
         @known_directories = {}
       end
 
@@ -84,6 +96,77 @@ module FtpSync
         @known_directories[path] = true
       end
     end
+
+    # One listing entry, normalised from an MLSx fact set or a parsed LIST line
+    # so that nothing above this class needs to know which command answered.
+    #
+    # +mtime_source+ records where the timestamp came from: MLSD dates entries
+    # in UTC with second precision, while LIST is the server's wall clock with
+    # minute precision, and the two cannot be compared with the same tolerance.
+    # A nil type means the source did not say what the entry is, which the
+    # listing reports as a failure; a nil mtime means the source carried no
+    # usable time, so nothing can be proven current.
+    class Entry
+      # MLSx type fact values this library understands. Anything else, including
+      # a missing fact, leaves the type unknown.
+      MLSX_TYPES = {
+        'file' => :file,
+        'dir' => :dir,
+        'os.unix=slink' => :symlink,
+        'os.unix=symlink' => :symlink,
+        'os.unix=chr' => :device,
+        'os.unix=blk' => :device,
+        'os.unix=fifo' => :device,
+        'os.unix=socket' => :device
+      }.freeze
+
+      # The pseudo entries every directory listing may carry: "cdir" and "pdir"
+      # in MLSx, and the same names as ordinary entries in LIST output.
+      PSEUDO_NAMES = %w[. ..].freeze
+
+      # Builds an entry from Net::FTP::MLSxEntry facts. The cdir and pdir types
+      # describe the listed directory itself, so they yield nothing.
+      def self.from_mlsx(mlsx_entry)
+        facts = mlsx_entry.facts
+        type = facts['type'].to_s.downcase
+        return if %w[cdir pdir].include?(type)
+
+        new(mlsx_entry.pathname, MLSX_TYPES[type], facts['size'].to_i, facts['modify'], :mlsx)
+      end
+
+      # Builds an entry from a net-ftp-list entry.
+      def self.from_list(list_entry)
+        new(list_entry.basename, list_entry.type, list_entry.filesize.to_i, list_entry.mtime, :list)
+      end
+
+      attr_reader :basename, :type, :filesize, :mtime, :mtime_source
+
+      def initialize(basename, type, filesize, mtime, mtime_source)
+        @basename = basename
+        @type = type
+        @filesize = filesize
+        @mtime = mtime
+        @mtime_source = mtime_source
+      end
+
+      def dir?
+        type == :dir
+      end
+
+      def file?
+        type == :file
+      end
+
+      def pseudo?
+        PSEUDO_NAMES.include?(basename)
+      end
+    end
+
+    # What one remote directory listing turned into. +names+ is every name the
+    # source reports, which is the keep-set when pruning; +status+ says how
+    # completely the listing could be interpreted, and therefore whether pruning
+    # is allowed at all.
+    Listing = Struct.new(:directories, :files, :names, :status)
 
     # Read when a connection is opened. Assigning to them afterwards does not
     # move an open connection and does not relabel it in the log.
@@ -249,6 +332,7 @@ module FtpSync
     def reset_capabilities
       @mdtm_supported = true
       @rename_supported = true
+      @mlsx_supported = true
     end
 
     def connection_options
@@ -276,45 +360,87 @@ module FtpSync
       remotepath.split('/').reject { |part| part.empty? || part == '.' }
     end
 
-    # Yields each entry reported for +remotepath+, skipping the "." and ".."
-    # pseudo entries, and returns whether the listing worked.
+    # Yields each entry the server reports for +remotepath+, normalised and
+    # without the "." / ".." pseudo entries.
+    #
+    # Returns :ok when every entry could be interpreted, :partial when at least
+    # one could not (each is reported as a failure, so a run that cannot read
+    # its own listing never looks successful) and :failed when the listing
+    # itself failed: raised, or reported under :skip_errors.
     def each_entry(remotepath, session)
-      @connection.list(remotepath) do |line|
-        entry = Net::FTP::List.parse(line)
-        next if %w[. ..].include?(entry.name)
+      status = :ok
+      listing_entries(remotepath) do |entry|
+        next if entry.pseudo?
+
+        if entry.type.nil?
+          report_failure(session.result, join_remote(remotepath, entry.basename), UNUSABLE_ENTRY)
+          status = :partial
+          next
+        end
 
         yield entry
       end
-      true
+      status
     rescue Net::FTPError => e
       raise unless session.options[:skip_errors]
 
       report_error(session.result, remotepath, e)
-      false
+      :failed
     end
 
-    # Maps the basenames of the files present in +remotepath+ to their LIST
-    # entry. An empty hash means the directory is empty; nil means the listing
-    # failed and was swallowed, which is a different answer.
-    def remote_entries(remotepath, session)
-      entries = {}
-      listed = each_entry(remotepath, session) do |entry|
-        entries[entry.basename] = entry if entry.file?
+    # Yields the raw listing, preferring MLSD: it types every entry and dates it
+    # in UTC, while LIST has to be parsed and depends on the server's locale.
+    # A 500/501/502/504 answer to MLSD means the server has none, so that verdict
+    # is remembered for the connection and LIST is used from then on. Every
+    # other failure is a real listing failure and is not retried with LIST.
+    def listing_entries(remotepath)
+      if @mlsx_supported
+        begin
+          @connection.mlsd(remotepath) do |mlsx_entry|
+            entry = Entry.from_mlsx(mlsx_entry)
+            yield entry if entry
+          end
+          return
+        rescue Net::FTPError => e
+          raise unless MLSD_UNSUPPORTED.match?(e.message)
+
+          @mlsx_supported = false
+          log 'Server does not implement MLSD; falling back to LIST'
+        end
       end
-      entries if listed
+
+      @connection.list(remotepath) do |line|
+        next if line.strip.empty?
+
+        list_entry = Net::FTP::List.parse(line)
+        yield Entry.from_list(list_entry) if list_entry
+      end
     end
 
-    # The parsed entries for +path+, or nil when the server will not list it.
+    # The entries of +remotepath+ by basename. A nil status means no listing was
+    # asked for; :partial and :failed mean the answer cannot be trusted to skip
+    # or delete anything.
+    def remote_entries(remotepath, session)
+      return [nil, {}] unless session.options[:since] || session.options[:prune]
+
+      entries = {}
+      status = each_entry(remotepath, session) { |entry| entries[entry.basename] = entry }
+      [status, entries]
+    end
+
+    # The normalised entries for +path+, or nil when the server will not list
+    # it. Entries whose type is unknown are left out: this answers one yes/no
+    # question about one name, and such an entry proves nothing either way.
     def entries_at(path)
       entries = []
-      @connection.list(path) { |line| entries << Net::FTP::List.parse(line) }
+      listing_entries(path) { |entry| entries << entry unless entry.type.nil? || entry.pseudo? }
       entries
     rescue Net::FTPError
       nil
     end
 
-    # The LIST entry for +path+ in its parent directory, or nil when the parent
-    # cannot be listed or does not report the name.
+    # The entry for +path+ in the listing of its parent directory, or nil when
+    # the parent cannot be listed or does not report the name.
     def parent_entry(path)
       entries = entries_at(File.dirname(path))
       entries&.find { |entry| entry.basename == File.basename(path) }
@@ -326,17 +452,21 @@ module FtpSync
     def skip_upload?(remote_file, remote_entry, local_path, session)
       return false unless session.options[:since]
       return false unless remote_entry
+      return false unless remote_entry.file?
       return false unless remote_entry.filesize == File.size(local_path)
 
       remote_time, provenance = remote_time(remote_file, remote_entry)
+      # Without a usable remote time nothing can be proven current.
+      return false if remote_time.nil?
+
       File.mtime(local_path) < remote_time + tolerance_for(provenance)
     end
 
-    # A LIST timestamp is a wall clock reading, so it needs the wide default
-    # tolerance. An MDTM timestamp is UTC with second precision and needs almost
-    # none, which is what keeps a recent edit visible.
+    # A LIST timestamp is a wall clock reading and needs the wide default
+    # tolerance; MLSD and MDTM date the entry in UTC with second precision and
+    # need almost none, which is what keeps a recent edit visible.
     def tolerance_for(provenance)
-      provenance == :mdtm ? MDTM_TOLERANCE : @mtime_tolerance
+      provenance == :list ? @mtime_tolerance : MDTM_TOLERANCE
     end
 
     # The remote file's modification time as UTC, together with where it came
@@ -344,19 +474,23 @@ module FtpSync
     # clock reading that net-ftp-list interprets as UTC. Servers without MDTM
     # fall back to the LIST value, which can be off by the server's UTC offset.
     def remote_time(remote_file, entry)
-      return [entry.mtime, :list] unless @mdtm_supported
+      return entry_time(entry) unless @mdtm_supported
 
       stamp = @connection.mdtm(remote_file)
       match = stamp && MDTM_FORMAT.match(stamp)
-      return [entry.mtime, :list] unless match
+      return entry_time(entry) unless match
 
       [Time.utc(*match.captures.map(&:to_i)), :mdtm]
     rescue ArgumentError
       log "Ignoring malformed MDTM time for #{remote_file}"
-      [entry.mtime, :list]
+      entry_time(entry)
     rescue Net::FTPError => e
       note_mdtm_failure(remote_file, e)
-      [entry.mtime, :list]
+      entry_time(entry)
+    end
+
+    def entry_time(entry)
+      [entry.mtime, entry.mtime_source]
     end
 
     # A 500/501/502 reply means the server has no MDTM, which is a different
@@ -387,9 +521,15 @@ module FtpSync
     end
 
     def report_error(result, path, error)
+      report_failure(result, path, error.message)
+    end
+
+    # Records a failure that did not come from an FTP reply, such as a listing
+    # entry whose type could not be determined.
+    def report_failure(result, path, message)
       result.failed += 1
-      result.errors << [path, error.message]
-      log "Error while processing #{path}: #{error.message}"
+      result.errors << [path, message]
+      log "Error while processing #{path}: #{message}"
     end
 
     # The pull direction: what a listed tree turns into locally. The two
@@ -405,9 +545,13 @@ module FtpSync
         return unless listing
 
         ensure_local_directory(localpath)
-        directories, files = listing
-        directories.each { |remote_dir, local_dir| pull_into(remote_dir, local_dir, session, &block) }
-        files.each { |remote_file, local_file, entry| download(remote_file, local_file, entry, session, &block) }
+        listing.directories.each do |remote_dir, local_dir|
+          pull_into(remote_dir, local_dir, session, &block)
+        end
+        listing.files.each do |remote_file, local_file, entry|
+          download(remote_file, local_file, entry, session, &block)
+        end
+        prune_local_directory(localpath, listing.names, listing.status, session)
       end
 
       def ensure_local_directory(localpath)
@@ -417,26 +561,34 @@ module FtpSync
         log "Creating #{localpath} directory"
       end
 
-      # The directory's entries split into directories to recurse into and files
-      # to download, or nil when the listing itself failed and was swallowed.
+      # Turns one remote directory into the subdirectories to recurse into, the
+      # files to download, the names the source has and the listing status; nil
+      # when the listing itself failed.
       def scan_directory(remotepath, localpath, session)
-        directories = []
-        files = []
-        listed = each_entry(remotepath, session) do |entry|
-          remote_child = join_remote(remotepath, entry.basename)
-          local_child = File.join(localpath, entry.basename)
-
-          if entry.dir?
-            directories << [remote_child, local_child]
-          elsif entry.file?
-            files << [remote_child, local_child, entry] if pull_file?(local_child, entry, session)
-          else
-            skip_entry(remote_child, entry_type(entry), session)
-          end
+        listing = Listing.new([], [], {}, :ok)
+        status = each_entry(remotepath, session) do |entry|
+          listing.names[entry.basename] = true
+          scan_entry(listing, remotepath, localpath, entry, session)
         end
-        return unless listed
+        return if status == :failed
 
-        [directories, files]
+        listing.status = status
+        listing
+      end
+
+      # Sorts one entry into the listing: directories to recurse into, files to
+      # fetch unless they are current, and everything else skipped and logged.
+      def scan_entry(listing, remotepath, localpath, entry, session)
+        remote_child = join_remote(remotepath, entry.basename)
+        local_child = File.join(localpath, entry.basename)
+
+        if entry.dir?
+          listing.directories << [remote_child, local_child]
+        elsif entry.file?
+          listing.files << [remote_child, local_child, entry] if pull_file?(local_child, entry, session)
+        else
+          skip_entry(remote_child, entry_type(entry), session)
+        end
       end
 
       # The LIST type in words, for the skip log. A line none of the parsers
@@ -458,6 +610,7 @@ module FtpSync
           session.result.skipped += 1
           return false
         end
+        return keep_local_without_remote_time?(local_path, session) if entry.mtime.nil?
         return true unless newer_local?(local_path, entry)
 
         if session.options[:protect_local]
@@ -469,6 +622,15 @@ module FtpSync
         true
       end
 
+      # Without a remote timestamp nothing proves the remote copy is the newer
+      # one, so :protect_local keeps the local file instead of guessing.
+      def keep_local_without_remote_time?(local_path, session)
+        return true unless session.options[:protect_local]
+
+        skip_entry(local_path, 'remote modification time unknown', session)
+        false
+      end
+
       # A file is up to date when it has the same size locally and the remote
       # copy is not newer. Downloaded files keep the server mtime, so an
       # unchanged file compares equal on the next run.
@@ -476,11 +638,15 @@ module FtpSync
         return false unless session.options[:since]
         return false unless File.file?(local_path)
         return false unless entry.filesize == File.size(local_path)
+        # Without a usable remote time nothing can be proven current.
+        return false if entry.mtime.nil?
 
         File.mtime(local_path) >= entry.mtime
       end
 
       def newer_local?(local_path, entry)
+        return false if entry.mtime.nil?
+
         File.file?(local_path) && File.mtime(local_path) > entry.mtime
       end
 
@@ -490,7 +656,7 @@ module FtpSync
         completed = transfer_file(remote_file, session) do
           @connection.getbinaryfile(remote_file, partial)
           warn_size_mismatch(remote_file, partial, entry)
-          File.utime(entry.mtime, entry.mtime, partial)
+          File.utime(entry.mtime, entry.mtime, partial) if entry.mtime
           FileUtils.mv(partial, local_file)
         end
         yield(local_file) if completed && block_given?
@@ -517,16 +683,19 @@ module FtpSync
       private
 
       def push_into(localpath, remotepath, session, &block)
-        known_remote = session.options[:since] ? remote_entries(remotepath, session) : {}
+        status, known_remote = remote_entries(remotepath, session)
         # :since protects a remote file by proving it is current. A listing that
-        # could not be read proves nothing, so this directory is left alone
-        # rather than re-uploading over possibly newer remote files.
-        return if known_remote.nil?
+        # failed or held entries nobody could interpret proves nothing, so this
+        # directory is left alone rather than uploading over newer remote files.
+        return if session.options[:since] && status && status != :ok
 
+        local_names = {}
         Dir.children(localpath).sort.each do |basename|
+          local_names[basename] = true
           push_entry(File.join(localpath, basename), join_remote(remotepath, basename),
                      known_remote[basename], session, &block)
         end
+        prune_remote_directory(remotepath, known_remote, local_names, status, session)
       end
 
       # One local entry, dispatched by what it is. Symlinks and leftovers of
@@ -663,5 +832,108 @@ module FtpSync
       end
     end
     include Push
+
+    # :prune deletes what the source no longer has. Both directions refuse to
+    # delete anything they cannot fully account for: a directory whose listing
+    # failed or held uninterpretable entries is left untouched, and no symlink is
+    # ever followed or removed. The destination root is never a candidate, only
+    # the entries inside it.
+    module Prune
+      private
+
+      def prune_local_directory(localpath, remote_names, status, session)
+        return unless session.options[:prune]
+        return refuse_pruning(localpath, status) unless status == :ok
+
+        Dir.children(localpath).sort.each do |basename|
+          next if remote_names.key?(basename)
+
+          remove_local_entry(File.join(localpath, basename), session)
+        end
+      end
+
+      def remove_local_entry(local_path, session)
+        if File.directory?(local_path) && !File.symlink?(local_path)
+          remove_local_tree(local_path, session)
+        else
+          File.unlink(local_path)
+          deleted_entry(local_path, session)
+        end
+      end
+
+      # A directory is emptied entry by entry so that a symlink is unlinked
+      # rather than followed into its target.
+      def remove_local_tree(local_path, session)
+        Dir.children(local_path).sort.each do |basename|
+          remove_local_entry(File.join(local_path, basename), session)
+        end
+        Dir.rmdir(local_path)
+        deleted_entry(local_path, session)
+      end
+
+      def prune_remote_directory(remotepath, remote_entries, local_names, status, session)
+        return unless session.options[:prune]
+        return refuse_pruning(remotepath, status) unless status == :ok
+
+        remote_entries.each do |basename, entry|
+          next if local_names.key?(basename)
+
+          remove_remote_entry(join_remote(remotepath, basename), entry, session)
+        end
+      end
+
+      # Deletes one remote entry and reports whether it is gone. A directory is
+      # only removed once its whole subtree was listed and understood, so partial
+      # knowledge never deletes anything.
+      def remove_remote_entry(remote_path, entry, session)
+        return nil unless remove_remote_content(remote_path, entry, session)
+
+        deleted_entry(remote_path, session)
+        true
+      rescue Net::FTPError => e
+        raise unless session.options[:skip_errors]
+
+        report_error(session.result, remote_path, e)
+        nil
+      end
+
+      def remove_remote_content(remote_path, entry, session)
+        if entry.dir?
+          return nil unless remove_remote_tree(remote_path, session)
+
+          @connection.rmdir(remote_path)
+        elsif entry.file?
+          @connection.delete(remote_path)
+        else
+          log "Not pruning #{remote_path}: #{entry_type(entry)}"
+          return nil
+        end
+        true
+      end
+
+      def remove_remote_tree(remote_path, session)
+        entries = {}
+        status = each_entry(remote_path, session) { |entry| entries[entry.basename] = entry }
+        return unless status == :ok
+
+        entries.each_value do |entry|
+          return nil unless remove_remote_entry(join_remote(remote_path, entry.basename), entry, session)
+        end
+        true
+      end
+
+      def deleted_entry(path, session)
+        session.result.deleted += 1
+        log "Deleted #{path}"
+      end
+
+      # Pruning is only safe on a listing that was read and interpreted whole;
+      # saying so is better than quietly doing nothing.
+      def refuse_pruning(path, status)
+        log "Not pruning #{path}: the listing was #{status == :partial ? 'incomplete' : 'unreadable'}"
+        nil
+      end
+    end
+    include Prune
   end
 end

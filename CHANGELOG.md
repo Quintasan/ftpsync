@@ -27,6 +27,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Warnings, visible with `:verbose`: a pull that finds a file that is newer
   locally, a transferred size that disagrees with the listing, and a leftover
   `*.ftpsync-part` file that is not uploaded.
+- `prune: true` on either direction deletes what the source no longer has:
+  files, and whole directories when their subtree is absent too. It is off by
+  default, never touches the destination root, and only deletes from a listing
+  that was read and interpreted whole, so a failed or partly unreadable listing
+  deletes nothing. Every deletion is logged.
+- `Result#deleted` counts the entries `:prune` removed, next to `transferred`,
+  `skipped` and `failed`.
 
 ### Changed
 
@@ -58,6 +65,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lines name the endpoint that was actually connected.
 - Downloads use `getbinaryfile` explicitly instead of relying on `Net::FTP`'s
   binary flag.
+- Listings come from `MLSD` when the server implements it. MLSD types every
+  entry and dates it in UTC with second precision, so it does not depend on the
+  server's locale the way `LIST` parsing does. A server without MLSD is asked
+  once per connection, the fallback to `LIST` is logged, and nothing else
+  changes. `.`/`..` and `cdir`/`pdir` entries are always ignored.
+- A listing entry whose type cannot be determined is a reported failure, not a
+  skip: it is counted in `failed`, listed in `errors` as
+  `[path, "unusable listing entry: type unknown"]` and logged. A non-English
+  server locale used to turn every `LIST` line into such an entry, so a pull
+  could transfer nothing and report success. Under `:since`, a directory whose
+  listing could not be read whole is not uploaded into, because freshness
+  cannot be proven.
+- `:since` treats a file whose remote entry carries no usable modification time
+  as changed and downloads it; `:protect_local` keeps the local copy in that
+  case, since nothing proves the remote copy is the newer one.
 
 ### Removed
 
@@ -100,6 +122,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before connecting, so mistakes surface as `ArgumentError` rather than as a
   `TypeError` during a transfer. An empty remote path still means the login
   directory for both directions; only local paths must be non-empty.
+- `:prune` is opt-in and per call; nothing is deleted unless it is passed.
+  Check `Result#deleted` to see what a run removed.
+- After upgrading against a server that speaks MLSD, the first `:since` pull
+  may re-download a file once: the timestamp stored by earlier versions came
+  from `LIST` (server wall clock, minute precision) and is replaced by the
+  server's UTC stamp. The run after that compares equal again.
+- A `LIST` line the parser cannot read now fails the entry instead of skipping
+  it. Runs against a non-English server that used to "succeed" while
+  transferring little or nothing will now report those entries in
+  `Result#failed`/`#errors`.
 
 ## [0.1.0] - 2026-10-15
 

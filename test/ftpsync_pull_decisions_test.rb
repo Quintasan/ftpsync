@@ -6,21 +6,37 @@ require 'support/sync_test_case'
 # transfers, what it refuses to touch and what it says about both.
 class FtpsyncPullDecisionsTest < SyncTestCase
   # Entries that are neither files nor directories used to vanish without a
-  # word; a skip the user cannot see is a hole in the local tree.
-  def test_skips_and_logs_entries_that_are_neither_files_nor_directories
+  # word; a skip the user cannot see is a hole in the local tree. Entries whose
+  # type is *known* stay skips; see the unparseable-entry test below for the
+  # type nobody could determine.
+  def test_skips_and_logs_known_non_file_entries
     with_local_dir do |base|
-      entries = [symlink_entry('link.txt'), device_entry('tty'), unparseable_entry('garbage')]
+      entries = [symlink_entry('link.txt'), device_entry('tty')]
 
       with_ftp('root' => entries + [file_entry('a.txt')]) do
         simple = recording_sync
         result = simple.pull_dir('root', base)
 
-        assert_equal [1, 3], [result.transferred, result.skipped]
+        assert_equal [1, 2], [result.transferred, result.skipped]
         assert_equal ['a.txt'], Dir.children(base)
         assert_equal ['Skipping root/link.txt: symbolic link',
-                      'Skipping root/tty: device',
-                      'Skipping root/garbage: not a regular file or directory'],
+                      'Skipping root/tty: device'],
                      simple.messages.grep(/\ASkipping /)
+      end
+    end
+  end
+
+  # A line no parser understood is not a skip: the entry may be a file, so the
+  # run has to report that it could not read it instead of looking clean.
+  def test_an_unparseable_listing_entry_is_a_reported_failure
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt'), unparseable_entry('garbage')]) do
+        simple = recording_sync
+        result = simple.pull_dir('root', base)
+
+        assert_equal [1, 0, 1], [result.transferred, result.skipped, result.failed]
+        assert_equal [['root/garbage', FtpSync::Simple::UNUSABLE_ENTRY]], result.errors
+        assert_logged(simple, 'root/garbage', FtpSync::Simple::UNUSABLE_ENTRY)
       end
     end
   end

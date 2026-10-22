@@ -38,7 +38,7 @@ class FtpsyncResultTest < SyncTestCase
   end
 
   def test_the_result_exposes_the_documented_fields
-    assert_equal %i[transferred skipped failed errors], FtpSync::Simple::Result.members
+    assert_equal %i[transferred skipped failed errors deleted], FtpSync::Simple::Result.members
   end
 
   def test_a_sync_counts_files_it_skips_because_they_are_up_to_date
