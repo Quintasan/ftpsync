@@ -12,18 +12,14 @@ permissions:
 jobs:
   test:
     name: Unit tests (Ruby ${{ matrix.ruby }})
-    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ruby 3.0/3.1 have no prebuilt binaries for ubuntu-latest (26.04),
-          # so they stay on the last image that still ships them.
           - ruby: '3.0'
-            os: ubuntu-24.04
           - ruby: '3.1'
-            os: ubuntu-24.04
           - ruby: '3.2'
           - ruby: '3.3'
           - ruby: '3.4'
@@ -33,7 +29,7 @@ jobs:
             experimental: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1.333.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
@@ -51,7 +47,7 @@ jobs:
       TZ: Europe/Warsaw
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1.333.0
         with:
           ruby-version: '4.0'
           bundler-cache: true
@@ -62,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1.333.0
         with:
           # Steep 2.x needs Ruby >= 3.3, so the Gemfile only adds the type
           # checking gems on this end of the matrix.
@@ -78,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1.333.0
         with:
           ruby-version: '4.0'
           bundler-cache: true
