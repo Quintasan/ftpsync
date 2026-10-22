@@ -41,7 +41,12 @@ jobs:
 
   test-integration:
     name: Integration tests (vsftpd via Docker)
-    runs-on: ubuntu-latest
+    # The image is an old Alpine/musl build. Its vsftpd segfaults (container
+    # exit 139) a few logins into the run on ubuntu-latest (26.04), even with
+    # seccomp disabled, while ubuntu-24.04 plus `seccomp=unconfined` is stable.
+    # The crash predates 0.2.0: the pre-0.2.0 library fails the same way. Revisit
+    # when the image is rebuilt against a newer musl.
+    runs-on: ubuntu-24.04
     env:
       # The tests skip themselves when Docker is missing. On this job that must
       # be a failure instead of a green run that exercised nothing.

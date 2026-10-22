@@ -69,9 +69,8 @@ class FtpServer
            '-e', "PUBLIC_IP=#{HOST}",
            # The image is an old Alpine/musl build whose vsftpd segfaults
            # (container exit 139) after a few logins under Docker's default
-           # seccomp profile on current kernels. Nothing in the tests needs the
-           # profile, and the crash reproduces with the pre-0.2.0 library too.
-           # Drop this if the image is rebuilt against a newer musl.
+           # seccomp profile. Nothing in the tests needs that profile, and the
+           # crash reproduces with the pre-0.2.0 library too.
            '--security-opt', 'seccomp=unconfined',
            IMAGE)
   end
