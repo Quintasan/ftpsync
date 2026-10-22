@@ -1,0 +1,58 @@
+# Minimal declarations for the parts of `net-ftp` and `net-ftp-list` that
+# `lib/ftpsync.rb` calls.
+#
+# Neither dependency ships RBS signatures (checked against net-ftp 0.3.9 and
+# net-ftp-list 3.4.1), so without this file every `Net::FTP` reference in
+# `lib/ftpsync.rb` would be an unknown constant and Steep could not check the
+# library at all. Only the members the library uses are declared; this is not a
+# description of the whole net-ftp API, and it is kept deliberately loose
+# (`Hash[Symbol, untyped]` for the constructor options) because net-ftp passes
+# them straight to `Socket`/`OpenSSL`.
+#
+# Delete this file once net-ftp and net-ftp-list ship their own signatures:
+# loading both would duplicate these declarations.
+
+module Net
+  class FTPError < StandardError
+  end
+
+  class FTP
+    module List
+      # Never nil in practice: the last registered parser emits a generic entry
+      # for a line no other parser understood.
+      def self.parse: (String line, **untyped options) -> Entry
+    end
+
+    class List::Entry
+      attr_reader basename: String
+      attr_reader filesize: Integer
+      attr_reader mtime: Time
+      attr_reader type: Symbol?
+      attr_reader symlink_destination: String?
+
+      alias name basename
+
+      def file?: () -> bool
+      def dir?: () -> bool
+    end
+
+    # net-ftp accepts the connection options as a hash, which is why the
+    # library builds one in `#connection_options`.
+    def initialize: (?String? host, ?Hash[Symbol, untyped] user_or_options) -> void
+
+    def connect: (String host, ?Integer port) -> void
+    def close: () -> void
+    def login: (?String user, ?String? passwd, ?String? acct) -> void
+    def passive=: (bool passive) -> bool
+
+    def list: (?String path) { (String line) -> void } -> void
+            | (?String path) -> Array[String]
+
+    def mdtm: (String filename) -> String
+    def mkdir: (String dirname) -> void
+    def rename: (String fromname, String toname) -> void
+    def delete: (String filename) -> void
+    def getbinaryfile: (String remotefile, ?String localfile) -> void
+    def putbinaryfile: (String localfile, ?String remotefile) -> void
+  end
+end

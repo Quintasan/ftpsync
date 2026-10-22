@@ -96,6 +96,68 @@ class FtpsyncIntegrationTest < Minitest::Test
     end
   end
 
+  def test_pushes_a_directory_tree
+    Dir.mktmpdir do |local|
+      FileUtils.mkdir_p(File.join(local, 'sub'))
+      File.write(File.join(local, 'a.txt'), 'hello a')
+      File.write(File.join(local, 'sub/b.txt'), 'hello b')
+
+      sync.push_dir(local, 'root')
+
+      Dir.mktmpdir do |pulled|
+        sync.pull_dir('root', pulled)
+
+        assert_equal 'hello a', File.read(File.join(pulled, 'a.txt'))
+        assert_equal 'hello b', File.read(File.join(pulled, 'sub', 'b.txt'))
+      end
+    end
+  end
+
+  def test_pushes_binary_files
+    payload = Random.bytes(1_048_576)
+
+    Dir.mktmpdir do |local|
+      File.binwrite(File.join(local, 'blob.bin'), payload)
+
+      sync.push_dir(local, 'root')
+
+      Dir.mktmpdir do |pulled|
+        sync.pull_dir('root', pulled)
+
+        assert_equal payload, File.binread(File.join(pulled, 'blob.bin'))
+      end
+    end
+  end
+
+  def test_push_since_skips_unchanged_files
+    Dir.mktmpdir do |local|
+      path = File.join(local, 'a.txt')
+      File.write(path, 'v1')
+      # The server stamps the upload with its own clock, so a file written well
+      # before the upload must still count as unchanged.
+      File.utime(Time.now - 3600, Time.now - 3600, path)
+      sync.push_dir(local, 'root')
+
+      uploaded = []
+      sync.push_dir(local, 'root', since: true) { |remote| uploaded << remote }
+
+      assert_empty uploaded
+    end
+  end
+
+  def test_push_since_refetches_changed_files
+    Dir.mktmpdir do |local|
+      File.write(File.join(local, 'a.txt'), 'v1')
+      sync.push_dir(local, 'root')
+
+      File.write(File.join(local, 'a.txt'), 'version two, longer')
+      uploaded = []
+      sync.push_dir(local, 'root', since: true) { |path| uploaded << path }
+
+      assert_equal ['root/a.txt'], uploaded
+    end
+  end
+
   private
 
   def server

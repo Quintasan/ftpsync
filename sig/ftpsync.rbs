@@ -1,0 +1,374 @@
+# Types for FtpSync.
+#
+# `FtpSync::VERSION` and `FtpSync::Simple` are the whole public surface:
+# everything under `Simple::Session`, `Simple::Pull` and `Simple::Push` is
+# internal. Those collaborators are still declared here, because they are
+# private methods and modules of `Simple` and Steep can only check
+# `lib/ftpsync.rb` as one unit if it knows their types.
+#
+# The call surface is the Ruby 2.6 one -- positional option hashes, no keyword
+# arguments -- so these signatures describe what callers can pass on every Ruby
+# the gem supports.
+
+module FtpSync
+  VERSION: String
+
+  # The option hash accepted by `Simple#initialize` and by `Simple#pull_dir` /
+  # `Simple#push_dir`.
+  #
+  # Values are `untyped` on purpose. The library validates *keys* at runtime
+  # (`Simple#validate_options`) and lets the values through to `Net::FTP` or
+  # into comparisons, so pinning them here would reject option hashes that work
+  # today. `nil` is accepted in place of a hash and means "no options"; both
+  # are spelled out at each call site below.
+  type options = Hash[Symbol, untyped]
+end
+
+class FtpSync::Simple
+  # Suffix of the side file a transfer is written to before it is renamed into
+  # place.
+  PART_SUFFIX: String
+
+  # Connection timeouts in seconds, used when the corresponding constructor
+  # option is absent.
+  DEFAULT_OPEN_TIMEOUT: Integer
+  DEFAULT_READ_TIMEOUT: Integer
+
+  # How far a local file may lead the remote timestamp and still count as
+  # unchanged. `LIST` reports whole minutes, so it needs a wide tolerance;
+  # `MDTM` reports whole seconds in UTC, so it needs almost none.
+  DEFAULT_MTIME_TOLERANCE: Integer
+  MDTM_TOLERANCE: Integer
+
+  # Option keys each entry point accepts. They are exposed constants, so a
+  # caller can build its option hash without duplicating them. `PULL_OPTIONS`
+  # also carries :protect_local, which has no meaning while pushing.
+  CONSTRUCTOR_OPTIONS: Array[Symbol]
+  PULL_OPTIONS: Array[Symbol]
+  PUSH_OPTIONS: Array[Symbol]
+
+  # Internal: the MDTM time-val format, and the reply codes that mean "this
+  # server has no MDTM/RNTO", as opposed to a per-file failure.
+  MDTM_FORMAT: Regexp
+  MDTM_UNSUPPORTED: Regexp
+  RENAME_UNSUPPORTED: Regexp
+
+  # Read when a connection is opened. Assigning to them later does not move an
+  # open connection and does not relabel it in the log.
+  attr_accessor server: String
+  attr_accessor port: Integer
+  attr_accessor username: String
+  attr_accessor password: String
+  attr_accessor passive: bool
+
+  # Creates a client for +server+.
+  #
+  # Constructor options:
+  #   :port             Integer port, default 21
+  #   :passive          bool, default true; active mode cannot traverse NAT
+  #   :verbose          log connection and transfer progress to stderr
+  #   :implicit_ftps    connect over implicit FTPS; implies :ssl
+  #   :ssl              upgrade the connection with AUTH TLS
+  #   :open_timeout     seconds allowed for opening the control connection
+  #   :read_timeout     seconds allowed for a single read
+  #   :mtime_tolerance  seconds of tolerance for LIST-based comparisons
+  #   :atomic_uploads   upload to a side file and rename it into place
+  #
+  # Unknown keys raise ArgumentError, and so does a non-Hash that is not nil.
+  # No connection is opened until it is needed.
+  def initialize: (
+    String server,
+    String username,
+    String password,
+    ?(FtpSync::options | nil) options
+  ) -> void
+
+  # Recursively pulls +remotepath+ into +localpath+ and returns the tally.
+  #
+  # Pull options:
+  #   :since          skip files whose local copy is current
+  #   :skip_errors    rescue Net::FTPError, log it and keep going
+  #   :protect_local  skip files that are newer locally than on the server
+  #
+  # The block receives the local path of every file that was fully downloaded;
+  # skipped and failed files never reach it. The connection is opened here if it
+  # is not already open and closed again when the outermost sync finishes.
+  def pull_dir: (
+    String remotepath,
+    String localpath,
+    ?(FtpSync::options | nil) options
+  ) ?{ (String local_file) -> void } -> Result
+
+  # Recursively pushes +localpath+ into +remotepath+, creating the remote
+  # directories that are missing, and returns the tally.
+  #
+  # Push options:
+  #   :since          skip files whose remote copy is current
+  #   :skip_errors    rescue Net::FTPError, log it and keep going
+  #
+  # The block receives the remote path of every file that was fully uploaded.
+  # +localpath+ that is not a directory raises ArgumentError before a
+  # connection is opened.
+  def push_dir: (
+    String localpath,
+    String remotepath,
+    ?(FtpSync::options | nil) options
+  ) ?{ (String remote_file) -> void } -> Result
+
+  # Opens the connection, closing any connection that is already open. Called
+  # for you by the sync methods; opening it yourself only moves a connection or
+  # login failure earlier. It cannot keep a connection alive across syncs: every
+  # top-level sync closes it at depth zero, and `#close!` closes it explicitly.
+  # Returns nothing: the connection stays private.
+  def connect!: () -> nil
+
+  # Closes the connection if one is open. Idempotent, and safe on a client that
+  # never connected.
+  def close!: () -> nil
+
+  # Writes +message+ to stderr when the instance was created with :verbose, and
+  # does nothing otherwise.
+  def log: (String message) -> nil
+
+  # Outcome of one top-level sync.
+  #
+  # +transferred+ counts files that reached their destination, +skipped+ counts
+  # entries deliberately left alone, and +failed+ counts the errors that
+  # :skip_errors swallowed, each of which is also listed in +errors+ as a
+  # [path, message] pair.
+  class Result
+    attr_accessor transferred: Integer
+    attr_accessor skipped: Integer
+    attr_accessor failed: Integer
+    attr_accessor errors: Array[[String, String]]
+
+    def initialize: (
+      Integer transferred,
+      Integer skipped,
+      Integer failed,
+      Array[[String, String]] errors
+    ) -> void
+  end
+
+  # State of one top-level sync: the caller's options, the tally that becomes
+  # the return value, and the remote directories this sync already created or
+  # confirmed.
+  class Session
+    attr_reader options: FtpSync::options
+    attr_reader result: Result
+
+    def initialize: (FtpSync::options options) -> void
+    def known_directory?: (String path) -> bool
+    def remember_directory: (String path) -> void
+
+    @options: FtpSync::options
+    @result: Result
+    @known_directories: Hash[String, bool]
+  end
+
+  include FtpSync::Simple::Pull
+  include FtpSync::Simple::Push
+
+  # Connection lifecycle is not thread-safe: one instance owns one connection
+  # and the sync in progress, so use one instance per thread.
+  @server: String
+  @username: String
+  @password: String
+  @port: Integer
+  @passive: bool
+  @verbose: bool
+  @ssl: bool
+  @implicit_ftps: bool
+  @open_timeout: Integer
+  @read_timeout: Integer
+  @mtime_tolerance: Numeric
+  @atomic_uploads: bool
+
+  # Declared non-nil even though `#close!` and the state before the first
+  # `#connect!` leave it nil: every read happens in or below `#synchronize`,
+  # which connects first, and Steep cannot describe "nil only while no sync is
+  # running". The two nil resets are therefore reported as hints, not errors.
+  @connection: Net::FTP
+  @endpoint: String?
+  @depth: Integer
+  @mdtm_supported: bool
+  @rename_supported: bool
+
+  private
+
+  def apply_options: (FtpSync::options options) -> void
+  def validate_options: (FtpSync::options options, Array[Symbol] allowed, String context) -> void
+  # `options` is required rather than optional: both callers pass it, and it may
+  # be nil, which the method normalises to an empty hash.
+  def sync_options: (FtpSync::options? options, Array[Symbol] allowed) -> FtpSync::options
+  # An empty remote path is the login directory; a local path must be non-empty.
+  def validate_remote_path: (untyped path) -> void
+  def validate_local_path: (untyped path) -> void
+
+  # Rejects a tolerance that is not a non-negative number, at construction time.
+  def validate_mtime_tolerance: (untyped value) -> void
+
+  # Runs a top-level sync on a live connection and closes it afterwards. Only
+  # the outermost call closes, so a callback can start another sync.
+  def synchronize: () { () -> void } -> void
+
+  def reset_capabilities: () -> void
+  def connection_options: () -> Hash[Symbol, untyped]
+
+  def skip_entry: (String path, String reason, Session session) -> void
+  def join_remote: (String? remote_dir, String basename) -> String
+  def remote_components: (String remotepath) -> Array[String]
+
+  def each_entry: (String remotepath, Session session) { (Net::FTP::List::Entry entry) -> void } -> bool
+  def remote_entries: (String remotepath, Session session) -> Hash[String, Net::FTP::List::Entry]?
+
+  # The parsed entries for a path, or nil when the server will not list it.
+  def entries_at: (String path) -> Array[Net::FTP::List::Entry]?
+
+  # The LIST entry for a path in its parent directory, or nil when the parent
+  # cannot be listed or does not report the name.
+  def parent_entry: (String path) -> Net::FTP::List::Entry?
+
+  def skip_upload?: (
+    String remote_file,
+    Net::FTP::List::Entry? remote_entry,
+    String local_path,
+    Session session
+  ) -> bool
+
+  # A LIST timestamp is a wall clock reading and needs the wide default
+  # tolerance; an MDTM timestamp is UTC with second precision.
+  def tolerance_for: (Symbol provenance) -> Numeric
+  def remote_time: (String remote_file, Net::FTP::List::Entry entry) -> [Time, Symbol]
+  def note_mdtm_failure: (String remote_file, Net::FTPError error) -> void
+
+  # The shared transfer guard: `true` when the transfer completed, `false` when
+  # :skip_errors swallowed its failure.
+  def transfer_file: (String path, Session session) { () -> void } -> bool
+  def report_error: (Result result, String path, Net::FTPError error) -> void
+end
+
+# The pull direction: listing a remote tree and turning it into local files.
+module FtpSync::Simple::Pull
+  @connection: Net::FTP
+  @mtime_tolerance: Numeric
+  @mdtm_supported: bool
+
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module. Steep types the
+  # `self` of a module method as the module itself, so the helpers it calls are
+  # redeclared here with the same types as in the class.
+  def log: (String message) -> nil
+  def join_remote: (String? remote_dir, String basename) -> String
+  def each_entry: (
+    String remotepath,
+    FtpSync::Simple::Session session
+  ) { (Net::FTP::List::Entry entry) -> void } -> bool
+  def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
+  def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+
+  def pull_into: (
+    String remotepath,
+    String localpath,
+    FtpSync::Simple::Session session
+  ) ?{ (String local_file) -> void } -> void
+
+  def ensure_local_directory: (String localpath) -> void
+
+  # The entries of one remote directory split into directories to recurse into
+  # and files to download, or nil when the listing failed and was swallowed.
+  def scan_directory: (
+    String remotepath,
+    String localpath,
+    FtpSync::Simple::Session session
+  ) -> [
+    Array[[String, String]],
+    Array[[String, String, Net::FTP::List::Entry]]
+  ]?
+
+  def entry_type: (Net::FTP::List::Entry entry) -> String
+  def pull_file?: (String local_path, Net::FTP::List::Entry entry, FtpSync::Simple::Session session) -> bool
+  def skip_file?: (String local_path, Net::FTP::List::Entry entry, FtpSync::Simple::Session session) -> bool
+  def newer_local?: (String local_path, Net::FTP::List::Entry entry) -> bool
+
+  def download: (
+    String remote_file,
+    String local_file,
+    Net::FTP::List::Entry entry,
+    FtpSync::Simple::Session session
+  ) ?{ (String local_file) -> void } -> void
+
+  def warn_size_mismatch: (String remote_file, String partial, Net::FTP::List::Entry entry) -> void
+end
+
+# The push direction: creating the remote tree and storing files in it.
+module FtpSync::Simple::Push
+  @connection: Net::FTP
+  @atomic_uploads: bool
+  @rename_supported: bool
+
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module; see the note in
+  # `FtpSync::Simple::Pull`.
+  def log: (String message) -> nil
+  def join_remote: (String? remote_dir, String basename) -> String
+  def remote_entries: (
+    String remotepath,
+    FtpSync::Simple::Session session
+  ) -> Hash[String, Net::FTP::List::Entry]?
+  def entries_at: (String path) -> Array[Net::FTP::List::Entry]?
+  def parent_entry: (String path) -> Net::FTP::List::Entry?
+  def remote_components: (String remotepath) -> Array[String]
+  def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
+  def skip_upload?: (
+    String remote_file,
+    Net::FTP::List::Entry? remote_entry,
+    String local_path,
+    FtpSync::Simple::Session session
+  ) -> bool
+  def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  def report_error: (
+    FtpSync::Simple::Result result,
+    String path,
+    Net::FTPError error
+  ) -> void
+
+  def push_into: (
+    String localpath,
+    String remotepath,
+    FtpSync::Simple::Session session
+  ) ?{ (String remote_file) -> void } -> void
+
+  def push_entry: (
+    String local_child,
+    String remote_child,
+    Net::FTP::List::Entry? remote_entry,
+    FtpSync::Simple::Session session
+  ) ?{ (String remote_file) -> void } -> void
+
+  def ensure_remote_directory: (String remotepath, FtpSync::Simple::Session session) -> void
+  def create_remote_directory: (String path, FtpSync::Simple::Session session) -> void
+
+  def explain_failed_mkdir: (
+    String path,
+    FtpSync::Simple::Session session,
+    Net::FTPError error
+  ) -> void
+  def remote_directory?: (String path) -> bool
+
+  def upload: (
+    String local_file,
+    String remote_file,
+    Net::FTP::List::Entry? remote_entry,
+    FtpSync::Simple::Session session
+  ) ?{ (String remote_file) -> void } -> void
+
+  def store_file: (String local_file, String remote_file) -> void
+  def store_without_rename: (String local_file, String remote_file, Net::FTPError error) -> void
+  def store_side_file: (String local_file, String temporary) -> void
+  def rename_side_file: (String temporary, String remote_file) -> Net::FTPError?
+  def store_in_place: (String local_file, String remote_file) -> void
+  def discard_remote_file: (String path) -> void
+end

@@ -1,94 +1,30 @@
 # frozen_string_literal: true
 
-require 'test_helper'
-require 'minitest/mock'
+require 'support/sync_test_case'
 
-class FtpsyncTest < Minitest::Test
-  FakeEntry = Struct.new(:name, :dir, :mtime, :filesize) do
-    def basename
-      name
-    end
-
-    def dir?
-      dir
-    end
-
-    def file?
-      !dir
-    end
-  end
-
-  # Stand-in for Net::FTP that serves precomputed LIST lines and records
-  # downloads instead of touching a real server.
-  class FakeFtp
-    attr_reader :downloaded, :connect_count
-
-    def initialize(listings)
-      @listings = listings
-      @downloaded = []
-      @connect_count = 0
-      @closed = false
-    end
-
-    def connect(_host, _port)
-      @connect_count += 1
-      @closed = false
-    end
-
-    def passive=(_enabled); end
-
-    def login(_username, _password); end
-
-    def list(remote, &block)
-      @listings.fetch(remote, {}).each_key { |line| block.call(line) }
-    end
-
-    def get(remote, local)
-      raise Net::FTPPermError, 'Permission denied' if remote.include?('secret')
-
-      @downloaded << [remote, local]
-    end
-
-    def close
-      @closed = true
-    end
-
-    def closed?
-      @closed
-    end
-  end
-
+class FtpsyncTest < SyncTestCase
   def test_that_it_has_a_version_number
     refute_nil ::FtpSync::VERSION
   end
 
   def test_downloads_files_and_recurses_into_directories
     with_local_dir do |base|
-      with_ftp(
-        'root' => {
-          'd subdir' => file_entry('subdir', dir: true),
-          'f a.txt' => file_entry('a.txt')
-        },
-        'root/subdir' => {
-          'f b.txt' => file_entry('b.txt')
-        }
-      ) do |ftp|
-        sync = build_sync
+      with_ftp('root' => [dir_entry('subdir'), file_entry('a.txt')],
+               'root/subdir' => [file_entry('b.txt')]) do |ftp|
         sync.pull_dir('root', base)
 
+        assert_equal remote_content('root/a.txt'), File.read(File.join(base, 'a.txt'))
+        assert_equal remote_content('root/subdir/b.txt'),
+                     File.read(File.join(base, 'subdir', 'b.txt'))
         # Directories are pulled before files, hence b.txt comes first.
-        assert_equal [
-          ['root/subdir/b.txt', File.join(base, 'subdir', 'b.txt')],
-          ['root/a.txt', File.join(base, 'a.txt')]
-        ], ftp.downloaded
+        assert_equal %w[root/subdir/b.txt root/a.txt], ftp.downloaded.map(&:first)
       end
     end
   end
 
   def test_creates_missing_local_directories
     with_local_dir do |base|
-      with_ftp('root' => {}) do
-        sync = build_sync
+      with_ftp('root' => []) do
         local = File.join(base, 'nested', 'deep')
 
         sync.pull_dir('root', local)
@@ -100,8 +36,7 @@ class FtpsyncTest < Minitest::Test
 
   def test_yields_block_with_local_path_of_each_downloaded_file
     with_local_dir do |base|
-      with_ftp('root' => { 'f a.txt' => file_entry('a.txt') }) do
-        sync = build_sync
+      with_ftp('root' => [file_entry('a.txt')]) do
         downloaded = []
 
         sync.pull_dir('root', base) { |path| downloaded << path }
@@ -118,8 +53,7 @@ class FtpsyncTest < Minitest::Test
       File.write(local, 'data')
       File.utime(time, time, local)
 
-      with_ftp('root' => { 'f a.txt' => file_entry('a.txt', mtime: time - 100, filesize: 4) }) do |ftp|
-        sync = build_sync
+      with_ftp('root' => [file_entry('a.txt', mtime: time - 100, filesize: 4)]) do |ftp|
         sync.pull_dir('root', base, since: true)
 
         assert_empty ftp.downloaded
@@ -135,59 +69,119 @@ class FtpsyncTest < Minitest::Test
       File.utime(time, time, local)
 
       with_ftp(
-        'root' => {
-          'f a.txt' => file_entry('a.txt', mtime: time + 100, filesize: 4), # newer than local
-          'f b.txt' => file_entry('b.txt', mtime: time - 100, filesize: 4)  # missing locally
-        }
+        'root' => [
+          file_entry('a.txt', mtime: time + 100, filesize: 4), # newer than local
+          file_entry('b.txt', mtime: time - 100, filesize: 4)  # missing locally
+        ]
       ) do |ftp|
-        sync = build_sync
         sync.pull_dir('root', base, since: true)
 
-        assert_equal [
-          ['root/a.txt', File.join(base, 'a.txt')],
-          ['root/b.txt', File.join(base, 'b.txt')]
-        ], ftp.downloaded
+        assert_equal %w[root/a.txt root/b.txt], ftp.downloaded.map(&:first)
+      end
+    end
+  end
+
+  # The server mtime is kept on the downloaded file, so a second :since run
+  # recognises its own work instead of re-fetching it.
+  def test_preserves_remote_mtime_so_the_next_since_run_changes_nothing
+    with_local_dir do |base|
+      time = Time.now - 7200
+      with_ftp({ 'root' => [file_entry('a.txt', mtime: time, filesize: 4)] },
+               { 'root/a.txt' => 'data' }) do |ftp|
+        sync.pull_dir('root', base)
+
+        assert_in_delta time.to_f, File.mtime(File.join(base, 'a.txt')).to_f, 0.01
+
+        sync.pull_dir('root', base, since: true)
+
+        assert_equal 1, ftp.downloaded.size
       end
     end
   end
 
   def test_skip_errors_continues_after_permission_denied
     with_local_dir do |base|
-      with_ftp(
-        'root' => {
-          'f secret.txt' => file_entry('secret.txt'),
-          'f a.txt' => file_entry('a.txt')
-        }
-      ) do |ftp|
-        sync = build_sync
+      with_ftp('root' => [file_entry('secret.txt'), file_entry('a.txt')]) do |ftp|
+        ftp.fail_gets['root/secret.txt'] = nil
+
         sync.pull_dir('root', base, skip_errors: true)
 
-        assert_equal [['root/a.txt', File.join(base, 'a.txt')]], ftp.downloaded
+        assert_equal %w[root/a.txt], ftp.downloaded.map(&:first)
       end
     end
   end
 
   def test_raises_without_skip_errors
     with_local_dir do |base|
-      with_ftp('root' => { 'f secret.txt' => file_entry('secret.txt') }) do
-        sync = build_sync
+      with_ftp('root' => [file_entry('secret.txt')]) do |ftp|
+        ftp.fail_gets['root/secret.txt'] = nil
 
-        error = assert_raises Net::FTPPermError do
+        assert_raises Net::FTPPermError do
           sync.pull_dir('root', base)
         end
+      end
+    end
+  end
 
-        assert_equal 'Permission denied', error.message
+  def test_skip_errors_also_covers_directory_listings
+    with_local_dir do |base|
+      with_ftp('root' => [dir_entry('locked'), file_entry('a.txt')],
+               'root/locked' => []) do |ftp|
+        ftp.fail_lists << 'root/locked'
+
+        sync.pull_dir('root', base, skip_errors: true)
+
+        assert_equal %w[root/a.txt], ftp.downloaded.map(&:first)
+      end
+    end
+  end
+
+  def test_raises_when_a_listing_fails_without_skip_errors
+    with_local_dir do |base|
+      with_ftp('root' => []) do |ftp|
+        ftp.fail_lists << 'root'
+
+        assert_raises Net::FTPPermError do
+          sync.pull_dir('root', base)
+        end
+      end
+    end
+  end
+
+  # A failed transfer must not leave a truncated file behind, nor clobber the
+  # file that was already there.
+  def test_failed_download_leaves_no_partial_file
+    with_local_dir do |base|
+      destination = File.join(base, 'a.txt')
+      File.write(destination, 'previous')
+
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        ftp.fail_gets['root/a.txt'] = 'partial'
+
+        sync.pull_dir('root', base, skip_errors: true)
+
+        assert_equal 'previous', File.read(destination)
+        refute_path_exists "#{destination}#{FtpSync::Simple::PART_SUFFIX}"
+      end
+    end
+  end
+
+  def test_failed_download_does_not_invoke_the_block
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        ftp.fail_gets['root/a.txt'] = 'partial'
+        downloaded = []
+
+        sync.pull_dir('root', base, skip_errors: true) { |path| downloaded << path }
+
+        assert_empty downloaded
       end
     end
   end
 
   def test_reuses_connection_across_nested_directories
     with_local_dir do |base|
-      with_ftp(
-        'root' => { 'd subdir' => file_entry('subdir', dir: true) },
-        'root/subdir' => {}
-      ) do |ftp|
-        sync = build_sync
+      with_ftp('root' => [dir_entry('subdir')], 'root/subdir' => []) do |ftp|
         sync.pull_dir('root', base)
 
         assert_equal 1, ftp.connect_count
@@ -198,41 +192,97 @@ class FtpsyncTest < Minitest::Test
 
   def test_reconnects_for_a_fresh_top_level_pull
     with_local_dir do |base|
-      with_ftp('root' => {}) do |ftp|
-        sync = build_sync
-        sync.pull_dir('root', base)
-        sync.pull_dir('root', base)
+      with_ftp('root' => []) do |ftp|
+        simple = sync
+        simple.pull_dir('root', base)
+        simple.pull_dir('root', base)
 
         assert_equal 2, ftp.connect_count
       end
     end
   end
 
-  private
+  def test_closes_the_connection_when_a_sync_fails
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        ftp.fail_gets['root/a.txt'] = nil
 
-  def file_entry(name, dir: false, mtime: Time.now, filesize: 0)
-    FakeEntry.new(name, dir, mtime, filesize)
-  end
-
-  def build_sync
-    FtpSync::Simple.new('ftp.example.com', 'user', 'pass', verbose: false)
-  end
-
-  def with_local_dir(&block)
-    Dir.mktmpdir(&block)
-  end
-
-  # Runs the block with Net::FTP.new and Net::FTP::List.parse substituted by
-  # fakes. +listings+ maps a remote path to a hash of raw LIST line => entry.
-  def with_ftp(listings)
-    entries = listings.each_with_object({}) do |(_path, lines), memo|
-      lines.each { |line, entry| memo[line] = entry }
+        assert_raises(Net::FTPPermError) { sync.pull_dir('root', base) }
+        assert_predicate ftp, :closed?
+      end
     end
+  end
 
-    ftp = FakeFtp.new(listings)
-    Net::FTP.stub(:new, ftp) do
-      Net::FTP::List.stub(:parse, ->(line) { entries.fetch(line) }) do
-        yield ftp
+  def test_reconnects_after_a_failed_sync
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        simple = sync
+        ftp.fail_gets['root/a.txt'] = nil
+        assert_raises(Net::FTPPermError) { simple.pull_dir('root', base) }
+
+        ftp.fail_gets.delete('root/a.txt')
+        simple.pull_dir('root', base)
+
+        assert_equal 2, ftp.connect_count
+        assert_equal remote_content('root/a.txt'), File.read(File.join(base, 'a.txt'))
+      end
+    end
+  end
+
+  # A callback that starts another sync keeps the connection open; only the
+  # outermost call closes it.
+  def test_nested_pull_from_a_block_reuses_the_connection
+    with_local_dir do |outer|
+      with_local_dir do |inner|
+        with_ftp('root' => [file_entry('a.txt')], 'other' => [file_entry('b.txt')]) do |ftp|
+          simple = sync
+          simple.pull_dir('root', outer) do
+            simple.pull_dir('other', inner)
+          end
+
+          assert_equal 1, ftp.connect_count
+          assert_predicate ftp, :closed?
+          assert_equal remote_content('other/b.txt'), File.read(File.join(inner, 'b.txt'))
+        end
+      end
+    end
+  end
+
+  def test_close_is_safe_when_never_connected
+    sync.close!
+    sync.close!
+
+    assert_nil sync.instance_variable_get(:@connection)
+  end
+
+  # A failed connect must not leave the socket open, and it must not stop the
+  # next sync from connecting afresh. That only holds when the nesting counter
+  # is incremented before the connection is attempted.
+  def test_a_failed_connect_propagates_and_does_not_poison_the_next_sync
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        simple = sync
+        ftp.fail_connect = true
+
+        assert_raises(Net::FTPConnectionError) { simple.pull_dir('root', base) }
+        assert_predicate ftp, :closed?
+
+        ftp.fail_connect = false
+        simple.pull_dir('root', base)
+
+        assert_equal [2, remote_content('root/a.txt')],
+                     [ftp.connect_count, File.read(File.join(base, 'a.txt'))]
+      end
+    end
+  end
+
+  def test_a_failed_login_propagates_and_closes_the_socket
+    with_local_dir do |base|
+      with_ftp('root' => []) do |ftp|
+        ftp.fail_login = true
+
+        assert_raises(Net::FTPPermError) { sync.pull_dir('root', base) }
+        assert_predicate ftp, :closed?
       end
     end
   end

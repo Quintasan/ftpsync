@@ -15,8 +15,15 @@ class FtpServer
   PASS = ENV.fetch('FTPSYNC_TEST_PASS', 'testpass')
   CONTAINER = "ftpsync-test-#{Process.pid}"
 
+  # Docker is optional locally: the integration tests skip when it is not
+  # installed. CI sets FTPSYNC_REQUIRE_DOCKER so that a missing Docker fails the
+  # job instead of reporting a fully skipped, green run.
   def self.available?
-    system('docker', 'version', out: File::NULL, err: File::NULL)
+    return true if system('docker', 'version', out: File::NULL, err: File::NULL)
+
+    raise 'Docker is required but unavailable (FTPSYNC_REQUIRE_DOCKER)' if ENV['FTPSYNC_REQUIRE_DOCKER']
+
+    false
   end
 
   def start

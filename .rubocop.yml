@@ -10,7 +10,9 @@ Metrics/AbcSize:
   Max: 20
 
 Metrics/ClassLength:
-  Max: 200
+  # Simple is the whole client: connection handling plus both directions, and
+  # the test classes are grouped by transfer behaviour.
+  Max: 260
 
 Metrics/MethodLength:
   Max: 20

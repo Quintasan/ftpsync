@@ -1,4 +1,6 @@
 /.bundle/
+# Private Operator brain: never published with the repo, never packaged.
+/.operator/
 /.yardoc
 /Gemfile.lock
 /_yardoc/

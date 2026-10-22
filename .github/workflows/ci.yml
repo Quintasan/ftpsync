@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Unit tests (Ruby ${{ matrix.ruby }})
@@ -26,31 +29,75 @@ jobs:
             experimental: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
         with:
           ruby-version: ${{ matrix.ruby }}
-      - run: bundle install
+          bundler-cache: true
       - run: bundle exec rake test
 
   test-integration:
     name: Integration tests (vsftpd via Docker)
     runs-on: ubuntu-latest
+    env:
+      # The tests skip themselves when Docker is missing. On this job that must
+      # be a failure instead of a green run that exercised nothing.
+      FTPSYNC_REQUIRE_DOCKER: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
         with:
           ruby-version: '4.0'
-      - run: bundle install
+          bundler-cache: true
       - run: bundle exec rake test:integration
+
+  types:
+    name: Types (RBS and Steep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+        with:
+          # Steep 2.x needs Ruby >= 3.3, so the Gemfile only adds the type
+          # checking gems on this end of the matrix.
+          ruby-version: '4.0'
+          bundler-cache: true
+      # `sig/` ships with the gem, so it is validated as shipped; `steep check`
+      # then checks lib/ against it.
+      - run: bundle exec rake rbs
+      - run: bundle exec steep check
 
   lint:
     name: Lint and package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
         with:
           ruby-version: '4.0'
-      - run: bundle install
+          bundler-cache: true
       - run: bundle exec rake rubocop
       - run: gem build ftpsync.gemspec
+      # `spec.files` comes from `git ls-files`, so a broken file list yields a
+      # gem that installs but cannot be required. Assert the artifact instead of
+      # trusting that `gem build` succeeded.
+      - name: Verify the packaged gem
+        run: |
+          set -euo pipefail
+
+          for gem_file in ftpsync-*.gem; do
+            ruby -rrubygems/package - "$gem_file" <<'RUBY'
+          files = Gem::Package.new(ARGV[0]).spec.files
+
+          required = %w[lib/ftpsync.rb sig/ftpsync.rbs CHANGELOG.md LICENSE.txt README.md]
+          missing = required - files
+          abort "#{ARGV[0]}: packaged gem is missing #{missing.join(', ')}" unless missing.empty?
+
+          dev_only = files.grep(%r{\A(bin|test|spec|features|\.github|\.operator)/}) |
+                     (files & %w[.rubocop.yml Gemfile])
+          abort "#{ARGV[0]}: packaged gem ships dev-only files #{dev_only.join(', ')}" unless dev_only.empty?
+
+          puts "#{ARGV[0]}: #{files.size} packaged files look right"
+          RUBY
+          done
+
+          rm -f ftpsync-*.gem
