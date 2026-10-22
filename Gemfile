@@ -6,8 +6,8 @@ source 'https://rubygems.org'
 gemspec
 
 group :development, :test do
-  # 6.x requires Ruby >= 3.2 and drops minitest/mock, which the test suite uses
-  # through Object#stub, so 5.x is the ceiling while CI covers Ruby 3.0/3.1.
+  # 6.x drops minitest/mock, which the test suite uses through Object#stub, so
+  # 5.x is the ceiling regardless of the Ruby version CI runs.
   gem 'minitest', '~> 5.0'
   gem 'rake', '~> 13.0'
   # A real, pure-Ruby FTP server run in-process by the integration tests, so
