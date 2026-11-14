@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require 'support/sync_test_case'
+# A UNIX socket is a file that is neither a regular file nor a directory, which
+# is what the push has to skip.
+require 'socket'
 
 class FtpsyncPushTest < SyncTestCase
   def test_uploads_files_and_creates_missing_remote_directories
@@ -282,6 +285,23 @@ class FtpsyncPushTest < SyncTestCase
         assert_equal ['root/a.txt'], ftp.uploaded.map(&:last)
         assert_equal [1, nil], [result.skipped, ftp.contents[partial_path('root/b.txt')]]
         assert_logged(simple, 'b.txt.ftpsync-part', 'leftover partial download')
+      end
+    end
+  end
+
+  # A socket in the local tree cannot be uploaded, so it is skipped and logged
+  # like a leftover partial, instead of being opened as if it were a file.
+  def test_skips_a_local_entry_that_is_not_a_file_or_directory
+    with_local_dir do |base|
+      write_files(base, 'a.txt' => 'one')
+      UNIXServer.new(File.join(base, 'sock')).close
+
+      with_ftp do |ftp|
+        simple = recording_sync
+        result = simple.push_dir(base, 'root')
+
+        assert_equal [['root/a.txt'], [1, 0]], [ftp.uploaded.map(&:last), [result.skipped, result.failed]]
+        assert_logged(simple, 'sock', 'not a regular file or directory')
       end
     end
   end

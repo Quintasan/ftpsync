@@ -17,6 +17,14 @@ Rake::TestTask.new(:'test:integration') do |t|
   t.test_files = FileList['test/integration/**/*_test.rb']
 end
 
+# The unit suite, measured. Kept out of `default` so that a normal `rake` stays
+# fast and quiet, and so that Ruby versions without simplecov can still test.
+desc 'Run the unit tests under SimpleCov and hold them to the coverage floor'
+task :coverage do
+  ENV['COVERAGE'] = '1'
+  Rake::Task[:test].invoke
+end
+
 RuboCop::RakeTask.new
 
 # A missing gem must say why it is missing instead of raising a LoadError.

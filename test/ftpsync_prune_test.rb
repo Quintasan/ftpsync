@@ -257,4 +257,37 @@ class FtpsyncPruneTest < SyncTestCase
       end
     end
   end
+
+  # A deletion the server refuses is reported, and the rest of the prune still
+  # happens: one unremovable file does not undo the other deletions.
+  def test_push_prune_reports_a_refused_deletion
+    with_local_dir do |base|
+      write_files(base, 'a.txt' => 'one')
+      entries = [file_entry('a.txt'), file_entry('stale.txt'), file_entry('old.txt')]
+
+      with_ftp({ 'root' => entries }, 'root/stale.txt' => 'old', 'root/old.txt' => 'old') do |ftp|
+        ftp.fail_deletes << 'root/stale.txt'
+
+        result = sync.push_dir(base, 'root', prune: true, skip_errors: true)
+
+        assert_equal [1, 1], [result.failed, result.deleted]
+        assert_equal ['root/a.txt', 'root/stale.txt'], ftp.contents.keys.sort
+        assert_equal [['root/stale.txt', '550 root/stale.txt: Permission denied']], result.errors
+      end
+    end
+  end
+
+  # Without :skip_errors the same refusal is the caller's to handle.
+  def test_push_prune_raises_a_refused_deletion_without_skip_errors
+    with_local_dir do |base|
+      write_files(base, 'a.txt' => 'one')
+      listings = { 'root' => [file_entry('a.txt'), file_entry('stale.txt')] }
+
+      with_ftp(listings, 'root/stale.txt' => 'old') do |ftp|
+        ftp.fail_deletes << 'root/stale.txt'
+
+        assert_raises(Net::FTPPermError) { sync.push_dir(base, 'root', prune: true) }
+      end
+    end
+  end
 end

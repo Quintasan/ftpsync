@@ -44,7 +44,7 @@ class FakeFtp
               :list_calls, :mlsd_calls, :rmdir_calls, :mlsx_facts, :fail_gets,
               :fail_puts, :fail_put_replies, :fail_lists, :fail_lists_after, :fail_mlsd,
               :fail_mkdirs,
-              :fail_mdtms, :fail_renames, :mdtm_calls, :mdtm_replies
+              :fail_mdtms, :fail_renames, :fail_deletes, :mdtm_calls, :mdtm_replies
 
   # +server_offset+ is how far the server's LIST wall clock leads UTC; real
   # servers emit LIST in their local time, which net-ftp-list then reads as UTC.
@@ -212,6 +212,7 @@ class FakeFtp
 
   def delete(remote)
     @deleted << remote
+    raise Net::FTPPermError, "550 #{remote}: Permission denied" if @fail_deletes.include?(remote)
     raise Net::FTPPermError, "550 #{remote}: No such file or directory" unless @contents.key?(remote)
 
     @contents.delete(remote)
@@ -340,6 +341,7 @@ class FakeFtp
     @fail_mkdirs = []
     @fail_mdtms = {}
     @fail_renames = []
+    @fail_deletes = []
     @mdtm_replies = {}
   end
 

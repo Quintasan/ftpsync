@@ -33,6 +33,20 @@ jobs:
           bundler-cache: true
       - run: bundle exec rake test
 
+  coverage:
+    name: Coverage floor
+    # One Ruby version is enough: the floor is about the source, not the
+    # interpreter. `rake coverage` is a separate task because the integration
+    # suite loads the library only in part and could never meet the floor.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1.333.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - run: bundle exec rake coverage
+
   test-integration:
     name: Integration tests (real FTP server)
     # The suite starts a pure-Ruby FTP server in-process, so it needs no
@@ -40,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # A non-UTC server is the only way to see the LIST-is-local-time versus
-      # MDTM-is-UTC difference that push :since exists to survive; on UTC the
+      # MDTM-is-UTC difference that :since exists to survive; on UTC the
       # bug class cannot appear at all.
       TZ: Europe/Warsaw
     steps:

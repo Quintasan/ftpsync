@@ -490,10 +490,12 @@ module FtpSync
 
     # The remote file's modification time as UTC, together with where it came
     # from. MDTM is timezone independent, unlike LIST, whose timestamp is a wall
-    # clock reading that net-ftp-list interprets as UTC. Servers without MDTM
-    # fall back to the LIST value, which can be off by the server's UTC offset.
+    # clock reading that net-ftp-list interprets as UTC. An MLSx entry already
+    # carries a UTC time of the same precision, so MDTM is not asked for it;
+    # servers without MDTM fall back to the LIST value, which can be off by the
+    # server's UTC offset.
     def remote_time(remote_file, entry)
-      return entry_time(entry) unless @mdtm_supported
+      return entry_time(entry) if entry.mtime_source == :mlsx || !@mdtm_supported
 
       stamp = @connection.mdtm(remote_file)
       match = stamp && MDTM_FORMAT.match(stamp)
@@ -555,6 +557,11 @@ module FtpSync
     # directions live in their own modules so each reads in one place, while
     # the connection, the error policy and the transfer guard stay shared.
     module Pull
+      # Listing types in words, for the skip log. An entry whose type nobody could
+      # determine is reported as a failure before it gets here, so the fallback is
+      # there for a type added to Entry later rather than for a real listing.
+      TYPE_NAMES = { symlink: 'symbolic link', device: 'device' }.freeze
+
       private
 
       def pull_into(remotepath, localpath, session, &block)
@@ -614,26 +621,16 @@ module FtpSync
         end
       end
 
-      # The remote time a pull decides with, and where it came from. A LIST
-      # timestamp is a wall clock reading that net-ftp-list treats as UTC, so on a
-      # server away from UTC it is off by the server's offset: enough for
-      # :protect_local to mistake a newer local edit for an older one. MDTM is
-      # timezone independent, so it is asked for exactly when a decision needs the
-      # time. An MLSx stamp is already UTC, and a plain pull asks for nothing.
+      # The remote time a pull decides with, and where it came from. A plain pull
+      # lets the remote copy win unconditionally, so it asks for no times.
       def pull_time(remote_file, entry, session)
         return entry_time(entry) unless session.options[:since] || session.options[:protect_local]
 
-        entry.mtime_source == :mlsx ? entry_time(entry) : remote_time(remote_file, entry)
+        remote_time(remote_file, entry)
       end
 
-      # The LIST type in words, for the skip log. A line none of the parsers
-      # understood produces an entry with no type at all.
       def entry_type(entry)
-        case entry.type
-        when :symlink then 'symbolic link'
-        when :device then 'device'
-        else 'not a regular file or directory'
-        end
+        TYPE_NAMES.fetch(entry.type, 'unknown type')
       end
 
       # Whether a listed file is downloaded at all. :since skips a file that is

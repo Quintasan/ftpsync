@@ -161,6 +161,23 @@ class FtpsyncMlsxTest < SyncTestCase
     end
   end
 
+  # An MLSx listing dates every entry in UTC with second precision, so :since
+  # has everything it needs and must not spend a round trip per file on MDTM.
+  def test_push_since_over_mlsx_asks_for_no_modification_times
+    with_local_dir do |base|
+      uploaded_at = Time.now - 600
+      set_mtime(write_file(base, 'a.txt', 'data'), uploaded_at - 60)
+
+      with_ftp('root' => [file_entry('a.txt', mtime: uploaded_at, filesize: 4)]) do |ftp|
+        ftp.mlsx = true
+        result = sync.push_dir(base, 'root', since: true)
+
+        assert_empty ftp.mdtm_calls
+        assert_equal [0, 1], [result.transferred, result.skipped]
+      end
+    end
+  end
+
   # A listing that could not be read whole cannot prove freshness, so :since
   # must not upload over it.
   def test_push_since_does_not_upload_from_a_partial_mlsx_listing

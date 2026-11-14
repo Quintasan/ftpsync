@@ -27,7 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tolerance made every file look current and turned `:since` into a no-op.
 - A pull asks for `MDTM` only when `:since` or `:protect_local` needs the time:
   a plain pull, and any pull over `MLSD`, which already dates entries in UTC,
-  spends no round trips on it.
+  spends no round trips on it. A push over `MLSD` now skips `MDTM` the same way,
+  so `:since` costs no round trip per file on such a server.
+- `rake coverage` runs the unit suite under SimpleCov and fails below 98% line
+  coverage of `lib/`; CI runs it in the `coverage` job. It is a separate task
+  because the integration suite loads the library only in part.
 
 ## [0.2.0] - 2026-10-21
 

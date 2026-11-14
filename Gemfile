@@ -20,6 +20,11 @@ group :development, :test do
   gem 'rubocop-minitest', '~> 0.41.0'
   gem 'rubocop-rake', '~> 0.7.1'
 
+  # Coverage, and the floor `rake coverage` holds the suite to. 0.22 is the last
+  # line that still installs on the older Rubies the gem itself supports, so a
+  # contributor on one of those can still install the test group.
+  gem 'simplecov', '~> 0.22.0'
+
   # Type checking. Steep 2.x requires Ruby >= 3.3 (rbs 4.x does too), while every
   # entry of the CI matrix runs `bundle install`. Declaring these
   # unconditionally would make the Ruby 3.0-3.2 jobs unresolvable, and the gem

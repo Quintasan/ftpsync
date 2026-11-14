@@ -232,6 +232,14 @@ listing cannot look like a near-empty successful pull.
 Run `bin/setup`, then `rake` for tests and RuboCop (`rake test` and `rake
 rubocop` separately); `bin/console` opens a prompt with the library loaded.
 
+### Coverage
+
+`rake coverage` runs the unit tests under SimpleCov and fails below 98% line
+coverage of `lib/`. Plain `rake test` does not measure coverage, so running a
+single test file stays fast and is not judged on the code it never loads. CI
+runs `rake coverage` in the `coverage` job; the HTML report lands in `coverage/`,
+which git ignores.
+
 ### Type checking
 
 The gem ships RBS signatures in `sig/ftpsync.rbs`. `rake steep` checks `lib/`
