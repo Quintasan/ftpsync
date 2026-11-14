@@ -202,6 +202,71 @@ class FtpsyncOptionsTest < SyncTestCase
     end
   end
 
+  # An infinite tolerance makes every file look current, so :since would quietly
+  # stop transferring anything.
+  def test_rejects_a_non_finite_mtime_tolerance
+    [Float::INFINITY, Float::NAN].each do |tolerance|
+      error = assert_raises(ArgumentError) do
+        FtpSync::Simple.new('ftp.example.com', 'user', 'pass', mtime_tolerance: tolerance)
+      end
+
+      assert_match(/finite, non-negative Numeric/, error.message)
+    end
+  end
+
+  # A flag that comes from a config file often arrives as a string, and "false"
+  # is truthy in Ruby: accepting it would switch the option on, not off.
+  def test_rejects_a_string_value_for_a_constructor_flag
+    error = assert_raises(ArgumentError) do
+      FtpSync::Simple.new('ftp.example.com', 'user', 'pass', verbose: 'no')
+    end
+
+    assert_match(/option :verbose must be true or false, got "no"/, error.message)
+  end
+
+  def test_rejects_a_string_value_for_a_pull_flag
+    with_local_dir do |base|
+      with_ftp do |ftp|
+        error = assert_raises(ArgumentError) { sync.pull_dir('root', base, since: 'true') }
+
+        assert_match(/option :since must be true or false, got "true"/, error.message)
+        assert_equal 0, ftp.connect_count
+      end
+    end
+  end
+
+  def test_rejects_a_string_value_for_a_push_flag
+    with_local_dir do |base|
+      with_ftp do |ftp|
+        error = assert_raises(ArgumentError) { sync.push_dir(base, 'root', prune: 'yes') }
+
+        assert_match(/option :prune must be true or false, got "yes"/, error.message)
+        assert_equal 0, ftp.connect_count
+      end
+    end
+  end
+
+  def test_rejects_a_string_ssl_option
+    error = assert_raises(ArgumentError) do
+      FtpSync::Simple.new('ftp.example.com', 'user', 'pass', ssl: 'yes')
+    end
+
+    assert_match(/option :ssl must be true or false, got "yes"/, error.message)
+  end
+
+  # nil is how a caller clears an option it read from somewhere else, so it
+  # reads as false rather than as an error.
+  def test_treats_a_nil_flag_as_false
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt')]) do |ftp|
+        result = sync.pull_dir('root', base, since: nil, protect_local: nil)
+
+        assert_equal 1, result.transferred
+        assert_empty ftp.mdtm_calls
+      end
+    end
+  end
+
   def test_zero_tolerance_uploads_a_file_that_is_any_amount_newer
     [0, 0.0].each do |tolerance|
       with_local_dir do |base|

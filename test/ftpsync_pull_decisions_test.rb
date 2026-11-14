@@ -177,4 +177,89 @@ class FtpsyncPullDecisionsTest < SyncTestCase
       end
     end
   end
+
+  # LIST reports the server's wall clock, which net-ftp-list reads as UTC, so on
+  # a server two hours ahead every remote file looks two hours newer than it is.
+  # A pull deciding with that time would overwrite a newer local edit.
+  def test_protect_local_keeps_a_newer_local_edit_on_a_server_away_from_utc
+    with_local_dir do |base|
+      local = write_file(base, 'a.txt', 'local edit')
+      set_mtime(local, Time.now + 60)
+
+      with_shifted_ftp(7200, 'root' => [file_entry('a.txt', filesize: 10)],
+                             'root/a.txt' => 'remote-ok!') do |ftp|
+        simple = recording_sync
+        result = simple.pull_dir('root', base, protect_local: true)
+
+        assert_equal [0, 1], [result.transferred, result.skipped]
+        assert_equal 'local edit', File.read(local)
+        assert_equal ['root/a.txt'], ftp.mdtm_calls
+      end
+    end
+  end
+
+  # The other half of the same bug: :since compares the local copy with the
+  # remote time, so a shifted LIST stamp makes an up-to-date file look stale.
+  def test_since_keeps_an_up_to_date_file_on_a_server_away_from_utc
+    with_local_dir do |base|
+      local = write_file(base, 'a.txt', 'remote-ok!')
+      set_mtime(local, Time.now + 60)
+
+      with_shifted_ftp(7200, 'root' => [file_entry('a.txt', filesize: 10)],
+                             'root/a.txt' => 'remote-ok!') do |ftp|
+        result = sync.pull_dir('root', base, since: true)
+
+        assert_equal [0, 1], [result.transferred, result.skipped]
+        assert_equal ['root/a.txt'], ftp.mdtm_calls
+        assert_equal 'remote-ok!', File.read(local)
+      end
+    end
+  end
+
+  # A plain pull lets the remote copy win unconditionally, so it must not spend
+  # a round trip per file asking for a time it will not use.
+  def test_a_plain_pull_asks_for_no_modification_times
+    with_local_dir do |base|
+      with_ftp('root' => [file_entry('a.txt'), file_entry('b.txt')]) do |ftp|
+        sync.pull_dir('root', base)
+
+        assert_empty ftp.mdtm_calls
+        assert_equal 2, ftp.downloaded.size
+      end
+    end
+  end
+
+  # An MLSx stamp is already UTC, so :since has everything it needs and must not
+  # ask MDTM as well.
+  def test_an_mlsx_pull_asks_for_no_modification_times
+    with_local_dir do |base|
+      local = write_file(base, 'a.txt', 'remote-ok!')
+      set_mtime(local, Time.now)
+
+      with_ftp('root' => [file_entry('a.txt', filesize: 10)]) do |ftp|
+        ftp.mlsx = true
+        result = sync.pull_dir('root', base, since: true)
+
+        assert_empty ftp.mdtm_calls
+        assert_equal [0, 1], [result.transferred, result.skipped]
+      end
+    end
+  end
+
+  # The download keeps the time it was judged by, so a second :since run
+  # compares equal instead of downloading the same file again.
+  def test_a_download_keeps_the_remote_time
+    with_local_dir do |base|
+      remote_time = Time.at(Time.now.to_i - 3600)
+
+      with_shifted_ftp(7200, { 'root' => [file_entry('a.txt', mtime: remote_time, filesize: 10)] },
+                       { 'root/a.txt' => 'remote-ok!' }) do
+        sync.pull_dir('root', base, since: true)
+        result = sync.pull_dir('root', base, since: true)
+
+        assert_equal remote_time, File.mtime(File.join(base, 'a.txt'))
+        assert_equal [1, 0], [result.skipped, result.transferred]
+      end
+    end
+  end
 end

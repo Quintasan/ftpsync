@@ -66,6 +66,11 @@ module FtpSync
     PULL_OPTIONS = %i[since skip_errors protect_local prune].freeze
     PUSH_OPTIONS = %i[since skip_errors prune].freeze
 
+    # Options read as true/false, with nil reading as false. :ssl is checked
+    # separately because it also takes an OpenSSL options hash. A string such as
+    # "false" is truthy in Ruby, so accepting one would switch the option on.
+    BOOLEAN_OPTIONS = %i[verbose passive implicit_ftps atomic_uploads since skip_errors protect_local prune].freeze
+
     # Outcome of one top-level sync. +transferred+ counts files that reached
     # their destination, +skipped+ counts entries deliberately left alone (up to
     # date under :since, symlinks and other non-files, protected local files,
@@ -173,8 +178,7 @@ module FtpSync
     attr_accessor :server, :port, :username, :password, :passive
 
     def initialize(server, username, password, options = {})
-      options = {} if options.nil?
-      validate_options(options, CONSTRUCTOR_OPTIONS, 'constructor')
+      options = validate_options(options, CONSTRUCTOR_OPTIONS, 'constructor')
       @server = server
       @username = username
       @password = password
@@ -197,7 +201,7 @@ module FtpSync
     # If a block is given, it is invoked with the local path of each downloaded
     # file. Returns a Result.
     def pull_dir(remotepath, localpath, options = {}, &block)
-      options = sync_options(options, PULL_OPTIONS)
+      options = validate_options(options, PULL_OPTIONS, 'sync')
       validate_remote_path(remotepath)
       validate_local_path(localpath)
       session = Session.new(options)
@@ -215,7 +219,7 @@ module FtpSync
     # If a block is given, it is invoked with the remote path of each uploaded
     # file. Returns a Result.
     def push_dir(localpath, remotepath, options = {}, &block)
-      options = sync_options(options, PUSH_OPTIONS)
+      options = validate_options(options, PUSH_OPTIONS, 'sync')
       validate_local_path(localpath)
       validate_remote_path(remotepath)
       raise ArgumentError, "#{localpath} is not a directory" unless File.directory?(localpath)
@@ -256,6 +260,12 @@ module FtpSync
       warn message if @verbose
     end
 
+    # Keeps the password out of logs and error reports: an inspect of a client is
+    # exactly what ends up in both.
+    def inspect
+      "#<#{self.class} server=#{@server.inspect} port=#{@port} username=#{@username.inspect} passive=#{@passive}>"
+    end
+
     private
 
     # The options are read here, once, because they describe the connection
@@ -274,29 +284,40 @@ module FtpSync
       @read_timeout = options.fetch(:read_timeout, DEFAULT_READ_TIMEOUT)
     end
 
-    # A tolerance that is not a non-negative number would only fail later, in
-    # the upload decision and outside :skip_errors, so it is rejected while the
-    # option is still in the caller's hands.
+    # A tolerance that is not a finite, non-negative number would only fail
+    # later, in the upload decision and outside :skip_errors, so it is rejected
+    # while the option is still in the caller's hands. Infinity would make every
+    # file look current and turn :since into a no-op.
     def validate_mtime_tolerance(value)
-      return if value.is_a?(Numeric) && value.real? && value >= 0
+      return if value.is_a?(Numeric) && value.real? && value >= 0 && value.finite?
 
-      raise ArgumentError, "mtime_tolerance must be a non-negative Numeric, got #{value.inspect}"
+      raise ArgumentError, "mtime_tolerance must be a finite, non-negative Numeric, got #{value.inspect}"
     end
 
-    # Rejects option keys the library does not understand, so that a typo such
-    # as +ssll:+ cannot silently leave the connection unencrypted.
+    # Rejects option keys and flag values the library does not understand, so
+    # that a typo such as +ssll:+ cannot silently leave the connection
+    # unencrypted, and returns the hash with nil read as an empty one.
     def validate_options(options, allowed, context)
+      options = {} if options.nil?
       raise ArgumentError, "#{context} options must be a Hash" unless options.is_a?(Hash)
 
       options.each_key do |key|
         raise ArgumentError, "Unknown #{context} option: #{key.inspect}" unless allowed.include?(key)
+
+        validate_option_value(key, options[key], context)
       end
+      options
     end
 
-    def sync_options(options, allowed)
-      options = {} if options.nil?
-      validate_options(options, allowed, 'sync')
-      options
+    # nil is accepted and reads as false. :ssl may also be a hash of OpenSSL
+    # options; a truthy value such as "no" would enable TLS with default
+    # options, which is not what it says.
+    def validate_option_value(key, value, context)
+      return unless key == :ssl || BOOLEAN_OPTIONS.include?(key)
+      return if [true, false, nil].include?(value)
+      return if key == :ssl && value.is_a?(Hash)
+
+      raise ArgumentError, "#{context} option #{key.inspect} must be true or false, got #{value.inspect}"
     end
 
     # An empty remote path is the login directory, which the rest of the path
@@ -318,13 +339,11 @@ module FtpSync
     # only the outermost one closes it.
     def synchronize
       @depth += 1
-      begin
-        connect! unless @connection
-        yield
-      ensure
-        @depth -= 1
-        close! if @depth.zero?
-      end
+      connect! unless @connection
+      yield
+    ensure
+      @depth -= 1
+      close! if @depth.zero?
     end
 
     # Capability probes are per connection: a different server, or the same one
@@ -548,8 +567,8 @@ module FtpSync
         listing.directories.each do |remote_dir, local_dir|
           pull_into(remote_dir, local_dir, session, &block)
         end
-        listing.files.each do |remote_file, local_file, entry|
-          download(remote_file, local_file, entry, session, &block)
+        listing.files.each do |remote_file, local_file, entry, remote_mtime|
+          download(remote_file, local_file, entry, remote_mtime, session, &block)
         end
         prune_local_directory(localpath, listing.names, listing.status, session)
       end
@@ -570,10 +589,8 @@ module FtpSync
           listing.names[entry.basename] = true
           scan_entry(listing, remotepath, localpath, entry, session)
         end
-        return if status == :failed
-
         listing.status = status
-        listing
+        listing unless status == :failed
       end
 
       # Sorts one entry into the listing: directories to recurse into, files to
@@ -585,10 +602,28 @@ module FtpSync
         if entry.dir?
           listing.directories << [remote_child, local_child]
         elsif entry.file?
-          listing.files << [remote_child, local_child, entry] if pull_file?(local_child, entry, session)
+          # The remote time the file was judged by is kept with it, so the
+          # download stamps the local copy with exactly that time and the next
+          # run compares equal.
+          remote_mtime, source = pull_time(remote_child, entry, session)
+          if pull_file?(local_child, entry, remote_mtime, source, session)
+            listing.files << [remote_child, local_child, entry, remote_mtime]
+          end
         else
           skip_entry(remote_child, entry_type(entry), session)
         end
+      end
+
+      # The remote time a pull decides with, and where it came from. A LIST
+      # timestamp is a wall clock reading that net-ftp-list treats as UTC, so on a
+      # server away from UTC it is off by the server's offset: enough for
+      # :protect_local to mistake a newer local edit for an older one. MDTM is
+      # timezone independent, so it is asked for exactly when a decision needs the
+      # time. An MLSx stamp is already UTC, and a plain pull asks for nothing.
+      def pull_time(remote_file, entry, session)
+        return entry_time(entry) unless session.options[:since] || session.options[:protect_local]
+
+        entry.mtime_source == :mlsx ? entry_time(entry) : remote_time(remote_file, entry)
       end
 
       # The LIST type in words, for the skip log. A line none of the parsers
@@ -605,13 +640,13 @@ module FtpSync
       # already current. A local file newer than the remote one is still replaced
       # by default, but never quietly: that is the one destructive thing a pull
       # does, and :protect_local turns it into a skip.
-      def pull_file?(local_path, entry, session)
-        if skip_file?(local_path, entry, session)
+      def pull_file?(local_path, entry, remote_mtime, source, session)
+        if skip_file?(local_path, entry, remote_mtime, source, session)
           session.result.skipped += 1
           return false
         end
-        return keep_local_without_remote_time?(local_path, session) if entry.mtime.nil?
-        return true unless newer_local?(local_path, entry)
+        return keep_local_without_remote_time?(local_path, session) if remote_mtime.nil?
+        return true unless newer_local?(local_path, remote_mtime)
 
         if session.options[:protect_local]
           skip_entry(local_path, 'newer than the remote copy', session)
@@ -632,31 +667,31 @@ module FtpSync
       end
 
       # A file is up to date when it has the same size locally and the remote
-      # copy is not newer. Downloaded files keep the server mtime, so an
+      # copy is not newer. Downloaded files keep the remote time, so an
       # unchanged file compares equal on the next run.
-      def skip_file?(local_path, entry, session)
+      def skip_file?(local_path, entry, remote_mtime, source, session)
         return false unless session.options[:since]
         return false unless File.file?(local_path)
         return false unless entry.filesize == File.size(local_path)
         # Without a usable remote time nothing can be proven current.
-        return false if entry.mtime.nil?
+        return false if remote_mtime.nil?
 
-        File.mtime(local_path) >= entry.mtime
+        # A LIST stamp is minute-aligned already; a wider grace would hide a
+        # remote change for a whole minute. MDTM keeps the clock jitter allowance.
+        File.mtime(local_path) >= remote_mtime - (source == :list ? 0 : MDTM_TOLERANCE)
       end
 
-      def newer_local?(local_path, entry)
-        return false if entry.mtime.nil?
-
-        File.file?(local_path) && File.mtime(local_path) > entry.mtime
+      def newer_local?(local_path, remote_mtime)
+        File.file?(local_path) && File.mtime(local_path) > remote_mtime
       end
 
-      def download(remote_file, local_file, entry, session)
+      def download(remote_file, local_file, entry, remote_mtime, session)
         partial = "#{local_file}#{PART_SUFFIX}"
         log "#{remote_file} => #{local_file}"
         completed = transfer_file(remote_file, session) do
           @connection.getbinaryfile(remote_file, partial)
           warn_size_mismatch(remote_file, partial, entry)
-          File.utime(entry.mtime, entry.mtime, partial) if entry.mtime
+          File.utime(remote_mtime, remote_mtime, partial) if remote_mtime
           FileUtils.mv(partial, local_file)
         end
         yield(local_file) if completed && block_given?

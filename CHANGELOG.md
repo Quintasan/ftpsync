@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A pull with `:since` or `:protect_local` decides with the same remote time a
+  push does: `MDTM` when the server has it, the listing otherwise. A `LIST`
+  timestamp is the server's wall clock read as UTC, so on a server away from UTC
+  it could make a newer local edit look older and overwrite it.
+- The remote time a pull judged a file by is written to the downloaded copy, so
+  a second `:since` pull compares equal instead of downloading it again.
+- `Simple#inspect` no longer contains the password. An inspect of a client is
+  exactly what ends up in logs and error reports.
+
+### Changed
+
+- Option values are validated, not only keys. A flag must be `true`, `false` or
+  `nil`, so `since: 'false'` read from a config file raises `ArgumentError`
+  instead of being truthy and switching the option on. `:ssl` also accepts an
+  OpenSSL options hash.
+- `mtime_tolerance:` must be finite as well as non-negative. An infinite
+  tolerance made every file look current and turned `:since` into a no-op.
+- A pull asks for `MDTM` only when `:since` or `:protect_local` needs the time:
+  a plain pull, and any pull over `MLSD`, which already dates entries in UTC,
+  spends no round trips on it.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added

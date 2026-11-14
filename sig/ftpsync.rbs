@@ -16,11 +16,13 @@ module FtpSync
   # The option hash accepted by `Simple#initialize` and by `Simple#pull_dir` /
   # `Simple#push_dir`.
   #
-  # Values are `untyped` on purpose. The library validates *keys* at runtime
-  # (`Simple#validate_options`) and lets the values through to `Net::FTP` or
-  # into comparisons, so pinning them here would reject option hashes that work
-  # today. `nil` is accepted in place of a hash and means "no options"; both
-  # are spelled out at each call site below.
+  # Values are `untyped` on purpose. The library validates the *keys* at
+  # runtime and the flag values (`:since`, `:verbose` and the rest) as true,
+  # false or nil; `:ssl` also takes a hash of OpenSSL options
+  # (`Simple#validate_options`). It lets the remaining values through to
+  # `Net::FTP` or into comparisons, so pinning them here would reject option
+  # hashes that work today. `nil` is accepted in place of a hash and means "no
+  # options"; both are spelled out at each call site below.
   type options = Hash[Symbol, untyped]
 end
 
@@ -47,6 +49,10 @@ class FtpSync::Simple
   CONSTRUCTOR_OPTIONS: Array[Symbol]
   PULL_OPTIONS: Array[Symbol]
   PUSH_OPTIONS: Array[Symbol]
+
+  # Options read as true/false, with nil reading as false. `:ssl` is not one of
+  # them because it also takes an OpenSSL options hash.
+  BOOLEAN_OPTIONS: Array[Symbol]
 
   # Internal: the MDTM time-val format, and the reply codes that mean "this
   # server has no MDTM/MLSD/RNTO", as opposed to a per-file failure.
@@ -137,6 +143,10 @@ class FtpSync::Simple
   # does nothing otherwise.
   def log: (String message) -> nil
 
+  # Never includes the password: an inspect of a client often lands in a log or
+  # an error report.
+  def inspect: () -> String
+
   # Outcome of one top-level sync.
   #
   # +transferred+ counts files that reached their destination, +skipped+ counts
@@ -192,16 +202,17 @@ class FtpSync::Simple
 
   # What one directory listing turned into: subdirectories to recurse into,
   # files to transfer, every name the source reports (the keep-set for pruning)
-  # and how completely the listing could be interpreted.
+  # and how completely the listing could be interpreted. Each file is kept with
+  # the remote time the pull judged it by, which is the time it is stamped with.
   class Listing
     attr_accessor directories: Array[[String, String]]
-    attr_accessor files: Array[[String, String, Entry]]
+    attr_accessor files: Array[[String, String, Entry, Time?]]
     attr_accessor names: Hash[String, bool]
     attr_accessor status: Symbol
 
     def initialize: (
       Array[[String, String]] directories,
-      Array[[String, String, Entry]] files,
+      Array[[String, String, Entry, Time?]] files,
       Hash[String, bool] names,
       Symbol status
     ) -> void
@@ -255,15 +266,21 @@ class FtpSync::Simple
   private
 
   def apply_options: (FtpSync::options options) -> void
-  def validate_options: (FtpSync::options options, Array[Symbol] allowed, String context) -> void
-  # `options` is required rather than optional: both callers pass it, and it may
-  # be nil, which the method normalises to an empty hash.
-  def sync_options: (FtpSync::options? options, Array[Symbol] allowed) -> FtpSync::options
+  # Rejects unknown option keys and flag values that are not true, false or nil,
+  # and returns the hash with nil read as an empty one.
+  def validate_options: (
+    FtpSync::options? options,
+    Array[Symbol] allowed,
+    String context
+  ) -> FtpSync::options
+  # :ssl also accepts a hash of OpenSSL options.
+  def validate_option_value: (Symbol key, untyped value, String context) -> void
   # An empty remote path is the login directory; a local path must be non-empty.
   def validate_remote_path: (untyped path) -> void
   def validate_local_path: (untyped path) -> void
 
-  # Rejects a tolerance that is not a non-negative number, at construction time.
+  # Rejects a tolerance that is not a finite, non-negative number, at
+  # construction time.
   def validate_mtime_tolerance: (untyped value) -> void
 
   # Runs a top-level sync on a live connection and closes it afterwards. Only
@@ -333,6 +350,8 @@ module FtpSync::Simple::Pull
   ) { (FtpSync::Simple::Entry entry) -> void } -> Symbol
   def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
   def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  def remote_time: (String remote_file, FtpSync::Simple::Entry entry) -> [Time?, Symbol]
+  def entry_time: (FtpSync::Simple::Entry entry) -> [Time?, Symbol]
   # Provided by `FtpSync::Simple::Prune`.
   def prune_local_directory: (
     String localpath,
@@ -364,24 +383,38 @@ module FtpSync::Simple::Pull
     FtpSync::Simple::Session session
   ) -> void
 
+  # The remote time a pull decides with, and where it came from. MDTM is asked
+  # for only when :since or :protect_local needs the time and the listing is
+  # LIST, which is a wall clock reading rather than UTC.
+  def pull_time: (
+    String remote_file,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> [Time?, Symbol]
+
   def entry_type: (FtpSync::Simple::Entry entry) -> String
   def pull_file?: (
     String local_path,
     FtpSync::Simple::Entry entry,
+    Time? remote_mtime,
+    Symbol source,
     FtpSync::Simple::Session session
   ) -> bool
   def keep_local_without_remote_time?: (String local_path, FtpSync::Simple::Session session) -> bool
   def skip_file?: (
     String local_path,
     FtpSync::Simple::Entry entry,
+    Time? remote_mtime,
+    Symbol source,
     FtpSync::Simple::Session session
   ) -> bool
-  def newer_local?: (String local_path, FtpSync::Simple::Entry entry) -> bool
+  def newer_local?: (String local_path, Time remote_mtime) -> bool
 
   def download: (
     String remote_file,
     String local_file,
     FtpSync::Simple::Entry entry,
+    Time? remote_mtime,
     FtpSync::Simple::Session session
   ) ?{ (String local_file) -> void } -> void
 

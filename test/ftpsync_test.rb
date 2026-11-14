@@ -286,4 +286,14 @@ class FtpsyncTest < SyncTestCase
       end
     end
   end
+
+  # An inspect of a client is exactly what ends up in a log line or an error
+  # report, so the password must not be in it.
+  def test_inspect_does_not_show_the_password
+    text = FtpSync::Simple.new('ftp.example.com', 'user', 's3cret', passive: false).inspect
+
+    refute_includes text, 's3cret'
+    assert_equal '#<FtpSync::Simple server="ftp.example.com" port=21 username="user" passive=false>',
+                 text
+  end
 end

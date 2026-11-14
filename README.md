@@ -84,11 +84,16 @@ block.
   upload with its own clock. A same-size file is skipped when it is less than
   the tolerance newer than the remote timestamp.
 
-For uploads FtpSync reads `MDTM` (UTC, second precision) and allows 2 seconds of
-clock jitter. Without `MDTM` it uses the listing timestamp: `MLSD` is also UTC
-and second-precision, while `LIST` is a local-time reading treated as UTC and
-uses `:mtime_tolerance` (60 seconds by default) for minute rounding. A backdated
-file (`cp -p`, restored build output) looks unchanged.
+For both directions FtpSync reads `MDTM` (UTC, second precision) and allows 2
+seconds of clock jitter. Without `MDTM` it uses the listing timestamp: `MLSD` is
+also UTC and second-precision, while `LIST` is a local-time reading treated as
+UTC and uses `:mtime_tolerance` (60 seconds by default) for minute rounding. A
+backdated file (`cp -p`, restored build output) looks unchanged.
+
+A pull asks for `MDTM` only when `:since` or `:protect_local` needs the time, so
+a plain pull, and any pull whose listing came from `MLSD`, spends no round trips
+on it. The time a download was judged by is written to the local copy, so the
+next `:since` pull compares equal instead of fetching the file again.
 
 With `:since`, a push leaves a directory unuploaded when its remote listing
 failed or was only partly readable: freshness cannot be proven. Swallowed
@@ -172,8 +177,11 @@ connection; a top-level sync always closes it at the end.
 ## Options
 
 Unknown option keys raise `ArgumentError` naming the key before connecting;
-invalid paths raise it too. `nil` options mean an empty hash. Local paths must be
-non-empty strings; remote paths may be empty. `FtpSync::Simple.new` accepts:
+invalid paths and option values raise it too. `nil` options mean an empty hash.
+A flag must be `true`, `false` or `nil`, so `since: 'false'` from a config file
+raises instead of being truthy and switching the option on; `:ssl` also accepts
+an OpenSSL options hash. Local paths must be non-empty strings; remote paths may
+be empty. `FtpSync::Simple.new` accepts:
 
 | Option             | Default                                  | Description |
 |--------------------|------------------------------------------|-------------|
@@ -184,7 +192,7 @@ non-empty strings; remote paths may be empty. `FtpSync::Simple.new` accepts:
 | `:implicit_ftps`   | `false`                                  | Start TLS immediately (implicit FTPS). Sets the default of `:ssl` to `true`. |
 | `:open_timeout`    | `30`                                     | Seconds to wait for the connection to open. |
 | `:read_timeout`    | `60`                                     | Seconds to wait for one read from the server. |
-| `:mtime_tolerance` | `60`                                     | `LIST` upload tolerance in seconds; a non-negative Numeric (Float allowed), otherwise `ArgumentError`. `MDTM` uses a fixed 2-second tolerance. |
+| `:mtime_tolerance` | `60`                                     | `LIST` tolerance in seconds; a finite, non-negative Numeric (Float allowed), otherwise `ArgumentError`. `MDTM` uses a fixed 2-second tolerance. |
 | `:atomic_uploads`  | `true`                                   | Upload to `<remote>.ftpsync-part` and rename into place. Set to `false` to write directly to the destination. |
 
 `pull_dir` accepts `:since`, `:skip_errors`, `:protect_local` and `:prune`;
@@ -239,8 +247,8 @@ skips, and runs anywhere. `ftpd` is a development/test dependency; the unit
 tests use `FakeFtp` and open no sockets.
 
 CI runs the suite with `TZ=Europe/Warsaw`, because the difference between
-`LIST` local time and `MDTM` UTC — which push `:since` exists to survive —
-cannot appear on a UTC server. The server cannot do TLS under OpenSSL 3, so TLS
+`LIST` local time and `MDTM` UTC — which `:since` exists to survive — cannot
+appear on a UTC server. The server cannot do TLS under OpenSSL 3, so TLS
 remains covered by the option-forwarding tests.
 
 Run `bundle exec rake install` to install locally. To release, update
