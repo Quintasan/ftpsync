@@ -86,7 +86,9 @@ class FtpsyncPruneTest < SyncTestCase
         result = simple.pull_dir('root', base, prune: true)
 
         assert_equal [1, 0], [result.failed, result.deleted]
-        assert_equal %w[a.txt stale.txt], Dir.children(base)
+        # Sorted: the directory lists in filesystem order, which a CI runner
+        # does not have to agree with.
+        assert_equal %w[a.txt stale.txt], Dir.children(base).sort
         assert_logged(simple, 'Not pruning', 'incomplete')
       end
     end
