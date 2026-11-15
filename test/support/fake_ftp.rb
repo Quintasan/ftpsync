@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'support/fake_ftp_entry'
+
 require 'fileutils'
 require 'net/ftp'
 require 'net/ftp/list'
@@ -11,40 +13,13 @@ require 'net/ftp/list'
 # (truncation and all), RNFR/RNTO and DELE. Specific operations can be made to
 # fail so error handling can be exercised.
 class FakeFtp
-  # Minimal Net::FTP::List::Entry lookalike. +type+ mirrors the real gem:
-  # :file, :dir, :symlink, :device, or nil for a line no parser understood.
-  Entry = Struct.new(:name, :type, :mtime, :filesize) do
-    def basename
-      name
-    end
-
-    def dir?
-      type == :dir
-    end
-
-    def file?
-      type == :file
-    end
-
-    def symlink?
-      type == :symlink
-    end
-
-    def device?
-      type == :device
-    end
-
-    def unknown?
-      !dir? && !file? && !symlink? && !device?
-    end
-  end
-
   attr_reader :downloaded, :uploaded, :attempted_puts, :created_dirs, :mkdir_calls,
               :deleted, :renames, :connect_count, :new_args, :contents, :get_calls,
               :list_calls, :mlsd_calls, :rmdir_calls, :mlsx_facts, :fail_gets,
               :fail_puts, :fail_put_replies, :fail_lists, :fail_lists_after, :fail_mlsd,
               :fail_mkdirs,
-              :fail_mdtms, :fail_renames, :fail_deletes, :mdtm_calls, :mdtm_replies
+              :fail_mdtms, :fail_renames, :fail_deletes, :mdtm_calls, :mdtm_replies,
+              :fail_gets_times, :fail_puts_times
 
   # +server_offset+ is how far the server's LIST wall clock leads UTC; real
   # servers emit LIST in their local time, which net-ftp-list then reads as UTC.
@@ -161,6 +136,11 @@ class FakeFtp
   end
 
   def getbinaryfile(remote, local)
+    if fail_once?(@fail_gets_times, remote)
+      File.write(local, 'half a file')
+      raise Net::FTPPermError, "426 #{remote}: Connection closed; transfer aborted"
+    end
+
     if @fail_gets.key?(remote)
       File.write(local, @fail_gets[remote]) if @fail_gets[remote]
       raise Net::FTPPermError, "550 #{remote}: Permission denied"
@@ -187,10 +167,7 @@ class FakeFtp
     raise Net::FTPPermError, "550 #{parent}: No such file or directory" unless @dirs.include?(parent)
 
     @contents[remote] = ''
-    # A reply code a test chose itself, for failures the client must not read as
-    # something else (a 500 from STOR is not a verdict about rename support).
-    raise Net::FTPPermError, @fail_put_replies.fetch(remote) if @fail_put_replies.key?(remote)
-    raise Net::FTPPermError, "553 #{remote}: Permission denied" if puts_failing?(remote)
+    raise_put_failure(remote)
 
     @contents[remote] = File.binread(local)
     store_entry(parent, Entry.new(File.basename(remote), :file, upload_mtime, File.size(local)))
@@ -272,6 +249,29 @@ class FakeFtp
     @rename_unsupported = false
   end
 
+  # A transient failure: the next attempt at +remote+ is let through. +budget+
+  # is a leftover count, so a test can say "the first two attempts die".
+  #
+  # +side_file+ says the caller names the file being stored, while the fake sees
+  # the side file it is really written as.
+  def fail_once?(budget, remote, side_file: false)
+    key = side_file ? remote.sub(/\.ftpsync-part\z/, '') : remote
+    remaining = budget[key].to_i
+    return false unless remaining.positive?
+
+    budget[key] = remaining - 1
+    true
+  end
+
+  # A reply code a test chose itself, for failures the client must not read as
+  # something else (a 500 from STOR is not a verdict about rename support).
+  def raise_put_failure(remote)
+    raise Net::FTPPermError, @fail_put_replies.fetch(remote) if @fail_put_replies.key?(remote)
+    raise Net::FTPPermError, "426 #{remote}: Connection closed; transfer aborted" if
+      fail_once?(@fail_puts_times, remote, side_file: true)
+    raise Net::FTPPermError, "553 #{remote}: Permission denied" if puts_failing?(remote)
+  end
+
   # Whether storing +remote+ is injected as failing. Naming a file to fail
   # fails the side file it would have been uploaded as too, so a test can say
   # "this file cannot be stored" without encoding how it is uploaded.
@@ -333,7 +333,9 @@ class FakeFtp
 
   def reset_failures
     @fail_gets = {}
+    @fail_gets_times = {}
     @fail_puts = []
+    @fail_puts_times = {}
     @fail_put_replies = {}
     @fail_lists = []
     @fail_lists_after = {}

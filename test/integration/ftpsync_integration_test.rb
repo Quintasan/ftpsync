@@ -234,8 +234,8 @@ class FtpsyncIntegrationTest < Minitest::Test
     end
   end
 
-  def sync(**options)
+  def sync(**)
     FtpSync::Simple.new(FtpServer::HOST, FtpServer::USER, FtpServer::PASS,
-                        passive: true, port: server.port, **options)
+                        passive: true, port: server.port, **)
   end
 end

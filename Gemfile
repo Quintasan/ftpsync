@@ -27,9 +27,9 @@ group :development, :test do
 
   # Type checking. Steep 2.x requires Ruby >= 3.3 (rbs 4.x does too), while every
   # entry of the CI matrix runs `bundle install`. Declaring these
-  # unconditionally would make the Ruby 3.0-3.2 jobs unresolvable, and the gem
-  # itself still supports Ruby >= 2.6, so they only exist where the tools can
-  # run. `rake steep`/`rake rbs` explain the same thing when they are missing.
+  # unconditionally would make the Ruby 3.2 job unresolvable, and the gem
+  # itself supports Ruby >= 3.2, so they only exist where the tools can run.
+  # `rake steep`/`rake rbs` explain the same thing when they are missing.
   if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.3')
     # Minor pins keep the types job reproducible, as with RuboCop above.
     gem 'rbs', '~> 4.2.0'

@@ -6,9 +6,9 @@
 # private methods and modules of `Simple` and Steep can only check
 # `lib/ftpsync.rb` as one unit if it knows their types.
 #
-# The call surface is the Ruby 2.6 one -- positional option hashes, no keyword
-# arguments -- so these signatures describe what callers can pass on every Ruby
-# the gem supports.
+# The call surface keeps positional option hashes rather than keyword
+# arguments, so that an existing call keeps working after the Ruby floor moved.
+# These signatures describe what callers can pass.
 
 module FtpSync
   VERSION: String
@@ -63,6 +63,9 @@ class FtpSync::Simple
 
   # Reported for a listing entry whose type could not be determined.
   UNUSABLE_ENTRY: String
+
+  # Logged for an entry that :exclude keeps out or :include does not name.
+  FILTERED_OUT: String
 
   # Read when a connection is opened. Assigning to them later does not move an
   # open connection and does not relabel it in the log.
@@ -224,6 +227,10 @@ class FtpSync::Simple
   class Session
     attr_reader options: FtpSync::options
     attr_reader result: Result
+    # Where the tree being synced starts on each side. A pattern is matched
+    # against a path relative to these, which keeps it the same on both.
+    attr_accessor local_root: String?
+    attr_accessor remote_root: String?
 
     def initialize: (FtpSync::options options) -> void
     def known_directory?: (String path) -> bool
@@ -232,8 +239,14 @@ class FtpSync::Simple
     @options: FtpSync::options
     @result: Result
     @known_directories: Hash[String, bool]
+    @local_root: String?
+    @remote_root: String?
   end
 
+  include FtpSync::Simple::Options
+  include FtpSync::Simple::Filtering
+  include FtpSync::Simple::Transfer
+  include FtpSync::Simple::Store
   include FtpSync::Simple::Pull
   include FtpSync::Simple::Push
 
@@ -251,6 +264,9 @@ class FtpSync::Simple
   @read_timeout: Integer
   @mtime_tolerance: Numeric
   @atomic_uploads: bool
+  @retries: Integer
+  @private_data_connection: bool?
+  @ssl_handshake_timeout: Numeric?
 
   # Declared non-nil even though `#close!` and the state before the first
   # `#connect!` leave it nil: every read happens in or below `#synchronize`,
@@ -266,22 +282,6 @@ class FtpSync::Simple
   private
 
   def apply_options: (FtpSync::options options) -> void
-  # Rejects unknown option keys and flag values that are not true, false or nil,
-  # and returns the hash with nil read as an empty one.
-  def validate_options: (
-    FtpSync::options? options,
-    Array[Symbol] allowed,
-    String context
-  ) -> FtpSync::options
-  # :ssl also accepts a hash of OpenSSL options.
-  def validate_option_value: (Symbol key, untyped value, String context) -> void
-  # An empty remote path is the login directory; a local path must be non-empty.
-  def validate_remote_path: (untyped path) -> void
-  def validate_local_path: (untyped path) -> void
-
-  # Rejects a tolerance that is not a finite, non-negative number, at
-  # construction time.
-  def validate_mtime_tolerance: (untyped value) -> void
 
   # Runs a top-level sync on a live connection and closes it afterwards. Only
   # the outermost call closes, so a callback can start another sync.
@@ -326,9 +326,96 @@ class FtpSync::Simple
 
   # The shared transfer guard: `true` when the transfer completed, `false` when
   # :skip_errors swallowed its failure.
-  def transfer_file: (String path, Session session) { () -> void } -> bool
   def report_error: (Result result, String path, Net::FTPError error) -> void
   def report_failure: (Result result, String path, String message) -> void
+end
+
+# The rules for what a caller may pass. Nothing here touches a connection, so a
+# typo or a bad value is refused before the first one opens.
+module FtpSync::Simple::Options
+  private
+
+  def validate_non_negative_number: (String name, untyped value) -> void
+  def validate_mtime_tolerance: (untyped value) -> void
+  def validate_retries: (untyped value) -> void
+
+  # Rejects unknown option keys and flag values that are not true, false or nil,
+  # and returns the hash with nil read as an empty one.
+  def validate_options: (
+    FtpSync::options? options,
+    Array[Symbol] allowed,
+    String context
+  ) -> FtpSync::options
+  # :ssl also accepts a hash of OpenSSL options.
+  def validate_option_value: (Symbol key, untyped value, String context) -> void
+  def validate_boolean_option: (Symbol key, untyped value, String context) -> void
+  def validate_ssl_option: (untyped value, String context) -> void
+  def validate_patterns: (Symbol key, untyped value, String context) -> void
+  # An empty remote path is the login directory; a local path must be non-empty.
+  def validate_remote_path: (untyped path) -> void
+  def validate_local_path: (untyped path) -> void
+end
+
+# What :exclude and :include mean for one path, matched against the path inside
+# the sync so that a pattern reads the same on both sides.
+module FtpSync::Simple::Filtering
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module; see the note in
+  # `FtpSync::Simple::Pull`.
+  def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
+
+  def relative_path: (String path, String? root) -> String
+  def plain_directory?: (String path) -> bool
+  def filtered_out?: (String path, bool directory, FtpSync::Simple::Session session) -> bool
+  def matches_any?: (untyped patterns, String path) -> bool
+  def skip_filtered_entry?: (
+    String path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> bool
+end
+
+# The bookkeeping around one transfer, shared by both directions.
+module FtpSync::Simple::Transfer
+  @retries: Integer
+
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module; see the note in
+  # `FtpSync::Simple::Pull`.
+  def log: (String message) -> nil
+  def report_error: (
+    FtpSync::Simple::Result result,
+    String path,
+    Net::FTPError error
+  ) -> void
+
+  def dry_run?: (FtpSync::Simple::Session session) -> bool
+  def planned_transfer: (String action, FtpSync::Simple::Session session) -> void
+  def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  def retrying: (String path) { () -> void } -> void
+end
+
+# How one file is written to the server: in place, or to a side file that is
+# renamed into place so that a failed upload cannot destroy the remote copy.
+module FtpSync::Simple::Store
+  @connection: Net::FTP
+  @atomic_uploads: bool
+  @rename_supported: bool
+
+  private
+
+  # Provided by `FtpSync::Simple`, which includes this module; see the note in
+  # `FtpSync::Simple::Pull`.
+  def log: (String message) -> nil
+
+  def store_file: (String local_file, String remote_file) -> void
+  def store_side_file: (String local_file, String temporary) -> void
+  def rename_side_file: (String temporary, String remote_file) -> Net::FTPError?
+  def store_without_rename: (String local_file, String remote_file, Net::FTPError error) -> void
+  def store_in_place: (String local_file, String remote_file) -> void
+  def discard_remote_file: (String path) -> void
 end
 
 # The pull direction: listing a remote tree and turning it into local files.
@@ -353,6 +440,14 @@ module FtpSync::Simple::Pull
   ) { (FtpSync::Simple::Entry entry) -> void } -> Symbol
   def skip_entry: (String path, String reason, FtpSync::Simple::Session session) -> void
   def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  # Provided by `FtpSync::Simple::Transfer` and `FtpSync::Simple::Filtering`.
+  def dry_run?: (FtpSync::Simple::Session session) -> bool
+  def planned_transfer: (String action, FtpSync::Simple::Session session) -> void
+  def skip_filtered_entry?: (
+    String path,
+    FtpSync::Simple::Entry entry,
+    FtpSync::Simple::Session session
+  ) -> bool
   def remote_time: (String remote_file, FtpSync::Simple::Entry entry) -> [Time?, Symbol]
   def entry_time: (FtpSync::Simple::Entry entry) -> [Time?, Symbol]
   # Provided by `FtpSync::Simple::Prune`.
@@ -369,7 +464,7 @@ module FtpSync::Simple::Pull
     FtpSync::Simple::Session session
   ) ?{ (String local_file) -> void } -> void
 
-  def ensure_local_directory: (String localpath) -> void
+  def ensure_local_directory: (String localpath, FtpSync::Simple::Session session) -> void
 
   # Nil when the listing itself failed and was swallowed.
   def scan_directory: (
@@ -452,6 +547,11 @@ module FtpSync::Simple::Push
     FtpSync::Simple::Session session
   ) -> bool
   def transfer_file: (String path, FtpSync::Simple::Session session) { () -> void } -> bool
+  # Provided by `FtpSync::Simple::Transfer` and `FtpSync::Simple::Filtering`.
+  def dry_run?: (FtpSync::Simple::Session session) -> bool
+  def planned_transfer: (String action, FtpSync::Simple::Session session) -> void
+  def relative_path: (String path, String? root) -> String
+  def filtered_out?: (String path, bool directory, FtpSync::Simple::Session session) -> bool
   def report_error: (
     FtpSync::Simple::Result result,
     String path,
@@ -524,12 +624,25 @@ module FtpSync::Simple::Prune
     Net::FTPError error
   ) -> void
 
+  # Provided by `FtpSync::Simple::Transfer` and `FtpSync::Simple::Filtering`.
+  def dry_run?: (FtpSync::Simple::Session session) -> bool
+  def filtered_out?: (String path, bool directory, FtpSync::Simple::Session session) -> bool
+  def relative_path: (String path, String? root) -> String
+  def plain_directory?: (String path) -> bool
+
   def prune_local_directory: (
     String localpath,
     Hash[String, bool] remote_names,
     Symbol status,
     FtpSync::Simple::Session session
   ) -> void
+  # Whether the entry is still part of the sync, which :exclude and :include
+  # decide, so that a filtered entry is never deleted.
+  def prunable?: (
+    String path,
+    String? root,
+    FtpSync::Simple::Session session
+  ) -> bool
   def remove_local_entry: (String local_path, FtpSync::Simple::Session session) -> void
   def remove_local_tree: (String local_path, FtpSync::Simple::Session session) -> void
 

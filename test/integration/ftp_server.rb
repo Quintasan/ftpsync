@@ -30,7 +30,7 @@ class FtpServer
   # predictable, but the window is picked at start-up: repeated or parallel
   # runs on one machine must not hand out the same data port.
   PASV_PORT_COUNT = 10
-  PASV_PORT_RANGE = (40_000..60_000).freeze
+  PASV_PORT_RANGE = (40_000..60_000)
   PASV_PORT_ATTEMPTS = 20
 
   # Authentication and storage for Ftpd::FtpServer.

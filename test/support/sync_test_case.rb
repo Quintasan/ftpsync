@@ -28,12 +28,12 @@ class SyncTestCase < Minitest::Test
     FtpSync::Simple.new('ftp.example.com', 'user', 'pass', verbose: false)
   end
 
-  def recording_sync
-    RecordingSync.new('ftp.example.com', 'user', 'pass')
+  def recording_sync(**options)
+    RecordingSync.new('ftp.example.com', 'user', 'pass', options)
   end
 
-  def with_local_dir(&block)
-    Dir.mktmpdir(&block)
+  def with_local_dir(&)
+    Dir.mktmpdir(&)
   end
 
   def with_ftp(listings = {}, contents = {}, server_offset = 0)
@@ -106,7 +106,7 @@ class SyncTestCase < Minitest::Test
 
   # A server whose LIST clock leads UTC by +server_offset+, as one running in
   # a non-UTC timezone does.
-  def with_shifted_ftp(server_offset, listings = {}, contents = {}, &block)
-    with_ftp(listings, contents, server_offset, &block)
+  def with_shifted_ftp(server_offset, listings = {}, contents = {}, &)
+    with_ftp(listings, contents, server_offset, &)
   end
 end

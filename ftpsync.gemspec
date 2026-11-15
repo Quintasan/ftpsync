@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
                      'for incremental syncs, TLS and per-file callbacks.'
   spec.homepage = 'https://github.com/Quintasan/ftpsync'
   spec.license = 'MIT'
-  spec.required_ruby_version = '>= 2.6.0'
+  spec.required_ruby_version = '>= 3.2.0'
 
   spec.metadata = {
     'bug_tracker_uri' => "#{spec.homepage}/issues",

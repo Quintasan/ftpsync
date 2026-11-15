@@ -251,7 +251,7 @@ class FtpsyncOptionsTest < SyncTestCase
       FtpSync::Simple.new('ftp.example.com', 'user', 'pass', ssl: 'yes')
     end
 
-    assert_match(/option :ssl must be true or false, got "yes"/, error.message)
+    assert_match(/option :ssl must be true, false or a Hash, got "yes"/, error.message)
   end
 
   # nil is how a caller clears an option it read from somewhere else, so it

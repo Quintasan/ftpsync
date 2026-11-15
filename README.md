@@ -11,7 +11,7 @@ receiving side, and copies files byte for byte. `pull_dir` downloads,
 
 ## Requirements
 
-* Ruby 2.6 or newer, with `net-ftp` 0.3.9 or newer (for the TLS and timeout
+* Ruby 3.2 or newer, with `net-ftp` 0.3.9 or newer (for the TLS and timeout
   options FtpSync passes) and `net-ftp-list` 3.2.8 or newer.
 
 ## Installation
@@ -113,6 +113,34 @@ cannot be fully read, and the reason is logged, so a bad listing never deletes
 anything. Symbolic links are never followed: a local link is unlinked, a remote
 one is left alone; `result.deleted` counts removals.
 
+## Preview a sync (`:dry_run`)
+
+```ruby
+result = sync.push_dir('./public', '/var/www/public', dry_run: true)
+puts "#{result.transferred} files would be uploaded"
+```
+
+A dry run reads both sides, decides as a real run would, and changes nothing: no
+file, directory or deletion is made on either side. `result.transferred` counts
+what would have been transferred, `result.deleted` what would have been removed,
+and `:verbose` logs each one as `Would ...`. Pass the same options you would use
+for the real run, `:prune` included.
+
+## Leave files out (`:exclude` and `:include`)
+
+```ruby
+sync.push_dir('./public', '/var/www/public', exclude: ['*.tmp', 'node_modules/**'])
+sync.pull_dir('reports', './reports', include: '**/*.csv')
+```
+
+Both take a pattern or an array of patterns, matched with `File.fnmatch?` against
+the path inside the sync: relative to the source root, with `/` as separator.
+`*` and `?` stop at a `/`; use `**/` to descend, as in `logs/**/*.log`. A
+directory matched by `:exclude` is left out with everything below it. `:include`
+names what to keep and never drops a directory, because a file below it may still
+match; `:exclude` wins over `:include`. Filtered entries count as skipped, and
+`:prune` never deletes them.
+
 ## Run code for each transferred file
 
 The block receives the local path when downloading and the remote path when
@@ -148,6 +176,19 @@ remote directory creation, logs it, and continues. Each caught error increments
 `result.failed` and is recorded in `result.errors`; `:verbose` prints the same
 messages to stderr. Local filesystem errors, dropped sockets and exceptions from
 your block still raise.
+
+## Retry a failed transfer (`:retries`)
+
+```ruby
+sync = FtpSync::Simple.new('ftp.example.com', 'user', 'pass', retries: 2)
+```
+
+`:retries` is how many times a failed transfer is re-issued on the same
+connection, so a transfer that dies on a dropped data connection is tried again.
+It is a non-negative Integer and defaults to `0`. The retry is logged with
+`:verbose`. When the budget is spent the failure is reported like any other: it
+counts in `result.failed` and raises unless `:skip_errors` is set. Reconnecting
+in the middle of a sync is left to the caller: run the sync again.
 
 ## Connect over TLS
 
@@ -194,11 +235,16 @@ be empty. `FtpSync::Simple.new` accepts:
 | `:read_timeout`    | `60`                                     | Seconds to wait for one read from the server. |
 | `:mtime_tolerance` | `60`                                     | `LIST` tolerance in seconds; a finite, non-negative Numeric (Float allowed), otherwise `ArgumentError`. `MDTM` uses a fixed 2-second tolerance. |
 | `:atomic_uploads`  | `true`                                   | Upload to `<remote>.ftpsync-part` and rename into place. Set to `false` to write directly to the destination. |
+| `:retries`         | `0`                                      | How many times a failed transfer is re-issued on the same connection. A non-negative Integer, otherwise `ArgumentError`. |
+| `:private_data_connection` | `nil` (library default)          | Passed to `Net::FTP`: keeps the data connection inside the TLS session, for servers that require it. |
+| `:ssl_handshake_timeout`   | `nil` (library default)          | Passed to `Net::FTP`: seconds to wait for the TLS handshake. |
 
-`pull_dir` accepts `:since`, `:skip_errors`, `:protect_local` and `:prune`;
-`push_dir` accepts `:since`, `:skip_errors` and `:prune`. All default to `false`;
-`:protect_local` on `push_dir` raises like any unknown key. `:verbose` writes
-through `FtpSync::Simple#log`, which can be overridden.
+`pull_dir` accepts `:since`, `:skip_errors`, `:protect_local`, `:prune`,
+`:dry_run`, `:exclude` and `:include`; `push_dir` accepts `:since`,
+`:skip_errors`, `:prune`, `:dry_run`, `:exclude` and `:include`. The flags all
+default to `false`, and `:exclude`/`:include` to no filtering. `:protect_local`
+on `push_dir` raises like any unknown key. `:verbose` writes through
+`FtpSync::Simple#log`, which can be overridden.
 
 ## Behaviour worth knowing
 
@@ -244,7 +290,7 @@ which git ignores.
 
 The gem ships RBS signatures in `sig/ftpsync.rbs`. `rake steep` checks `lib/`
 against them and `rake rbs` validates them; both need Ruby 3.3 or newer, while
-the library still supports Ruby 2.6. CI runs them in the `types` job on Ruby 4.0.
+the library itself supports Ruby 3.2. CI runs them in the `types` job on Ruby 4.0.
 The signatures are not exhaustive: option values are `untyped`.
 
 ### Integration tests

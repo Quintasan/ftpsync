@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `:dry_run` on `pull_dir` and `push_dir` decides as a real run would and
+  changes nothing on either side. `Result#transferred` and `Result#deleted`
+  count what would have happened, and `:verbose` logs each one as `Would ...`.
+- `:exclude` and `:include` on `pull_dir` and `push_dir` take a pattern or an
+  array of patterns, matched with `File.fnmatch?` against the path inside the
+  sync. `:exclude` drops a directory with its subtree and wins over `:include`;
+  `:include` never drops a directory. Filtered entries count as skipped, and
+  `:prune` never deletes them.
+- `:retries` on `FtpSync::Simple.new` re-issues a failed transfer on the same
+  connection, up to that many times (default `0`).
+- `:private_data_connection` and `:ssl_handshake_timeout` are passed to
+  `Net::FTP` for servers that need them.
+
 ### Fixed
 
 - A pull with `:since` or `:protect_local` decides with the same remote time a
@@ -19,6 +34,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The client is split into files under `lib/ftpsync/simple/`, one for each part
+  and each collaborator. The public API is unchanged.
 - Option values are validated, not only keys. A flag must be `true`, `false` or
   `nil`, so `since: 'false'` read from a config file raises `ArgumentError`
   instead of being truthy and switching the option on. `:ssl` also accepts an
@@ -32,6 +49,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rake coverage` runs the unit suite under SimpleCov and fails below 98% line
   coverage of `lib/`; CI runs it in the `coverage` job. It is a separate task
   because the integration suite loads the library only in part.
+- The declared Ruby floor is now 3.2, which the code already needed. The
+  gemspec, RuboCop and the signature file say so, and CI tests that version.
 
 ## [0.2.0] - 2026-10-21
 
