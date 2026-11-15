@@ -26,9 +26,10 @@ Gem::Specification.new do |spec|
 
   # Files that exist only to develop the gem. They are not part of the
   # library, so they must not reach the packaged artifact. `sig/` is API and
-  # ships; the Steepfile is local tool configuration like .rubocop.yml.
+  # ships; the Steepfile, RuboCop config, Gemfile and Rakefile describe how to
+  # work on the gem, and the installed gem has nothing for them to act on.
   dev_only_paths = %r{\A(bin|test|spec|features|\.github|\.operator)/}
-  dev_only_files = %w[.rubocop.yml Gemfile Steepfile].freeze
+  dev_only_files = %w[.gitignore .rubocop.yml Gemfile Rakefile Steepfile].freeze
 
   # `git ls-files` is empty outside a git checkout (export tarball,
   # `git archive`, Docker build), and `gem build` would then happily package an
